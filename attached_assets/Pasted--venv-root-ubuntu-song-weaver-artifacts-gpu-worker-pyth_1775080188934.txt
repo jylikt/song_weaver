@@ -1,0 +1,35 @@
+(.venv) root@ubuntu:~/song_weaver/artifacts/gpu-worker# python main.py
+INFO:     Will watch for changes in these directories: ['/root/song_weaver/artifacts/gpu-worker']
+INFO:     Uvicorn running on http://0.0.0.0:9000 (Press CTRL+C to quit)
+INFO:     Started reloader process [4032] using WatchFiles
+INFO:     Started server process [4034]
+INFO:     Waiting for application startup.
+2026-04-01 21:48:15,999 [INFO] app.main — GPU Worker started | env=production | default_model=yue-base | yue_path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | auth=enabled
+INFO:     Application startup complete.
+INFO:     127.0.0.1:54668 - "GET /health HTTP/1.1" 200 OK
+2026-04-01 21:48:21,943 [INFO] app.state — Loading YuE model | path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | trust_remote_code=False
+2026-04-01 21:48:23,641 [INFO] app.yue_adapter — Detecting model architecture | path=/root/YuE-s1-7B-anneal-en-icl
+2026-04-01 21:48:23,675 [INFO] app.yue_adapter — Detected config class: LlamaConfig
+2026-04-01 21:48:23,675 [INFO] app.yue_adapter — Resolved model family: causal (Llama/decoder-only path)
+2026-04-01 21:48:23,675 [INFO] app.state — Resolved model family: causal
+2026-04-01 21:48:23,675 [INFO] app.yue_adapter — Loading xcodec2 codec | path=/root/xcodec2 | device=cuda
+2026-04-01 21:48:24,540 [INFO] root — lm_eval is not installed, GPTQ may not be usable
+You are using a model of type `xcodec2` to instantiate a model of type `xcodec`. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-04-01 21:48:25,737 [ERROR] app.yue_adapter — Failed to load xcodec2 codec from '/root/xcodec2': You are using `from_pretrained` with a meta device context manager or `torch.set_default_device('meta')`.
+This is an anti-pattern as `from_pretrained` wants to load existing weights.
+If you want to initialize an empty model on the meta device, use the context manager or global device with `from_config`, or `ModelClass(config)`
+Generations will fall back to silent WAV.
+Fix options:
+  • Set YUE_CODEC_PATH to a local directory with pre-downloaded codec weights.
+  • If the repo is gated, set YUE_HF_TOKEN to your HuggingFace token.
+  • Run: pip install xcodec2  (if the xcodec2 package is available).
+  • Set YUE_REPO_PATH to a cloned HKUSTAudio/YuE repo for native inference.
+2026-04-01 21:48:25,737 [INFO] app.yue_adapter — Loading causal LM (AutoModelForCausalLM) | path=/root/YuE-s1-7B-anneal-en-icl
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading weights: 100%|███████████████████████████████████████████████████████████████| 291/291 [00:01<00:00, 271.75it/s]
+2026-04-01 21:48:28,910 [INFO] app.yue_adapter — Causal model + tokenizer loaded successfully
+2026-04-01 21:48:28,912 [INFO] app.state — YuE model ready | model=yue-base | family=causal | device=cuda | dtype=fp16 | load_time=7.0s
+INFO:     127.0.0.1:54668 - "POST /load-model HTTP/1.1" 200 OK
+2026-04-01 21:48:28,922 [INFO] app.routes.generate — Generation start | job=c73d0a75-b0fb-4584-a8f6-0d5a4e5fc846 | model=yue-base | family=causal | stub=False | style=pop | duration=15s | seed=None
+2026-04-01 21:48:28,923 [INFO] app.yue_adapter — Causal inference start | job=c73d0a75-b0fb-4584-a8f6-0d5a4e5fc846 | prompt_chars=617 | duration=15s | codec_loaded=False | text_vocab_size=32000
+2026-04-01 21:48:28,927 [INFO] app.yue_adapter — Token budget | prompt=201 | max_new=9000 | ctx_limit=16384 | ideal=9000

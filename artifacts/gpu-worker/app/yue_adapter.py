@@ -125,7 +125,7 @@ def load_model_and_processor(
         raise RuntimeError("transformers not installed. Run: pip install transformers accelerate") from exc
 
     token = hf_token or None
-    common = dict(torch_dtype=torch_dtype, low_cpu_mem_usage=True,
+    common = dict(dtype=torch_dtype, low_cpu_mem_usage=True,
                   trust_remote_code=trust_remote_code, token=token)
 
     try:
@@ -175,11 +175,24 @@ def load_codec(
     """
     Load the xcodec2 audio codec used to decode YuE audio tokens to waveforms.
 
-    Tries in order:
-      1. xcodec2 package  (pip install xcodec2)
-      2. AutoModel with trust_remote_code=True (works from the HF repo directly)
+    Loading strategy (tried in order until one succeeds):
 
-    Returns None on failure — caller should treat this as a degraded mode.
+      1. Direct module import from the local codec directory.
+         AutoModel.from_pretrained() with trust_remote_code=True triggers a
+         meta-device initialization path for the xcodec2 model type, producing
+         the error "from_pretrained with a meta device context manager".
+         Importing the model class directly from the directory avoids AutoModel
+         entirely and sidesteps the meta-device issue.
+
+      2. xcodec2 pip package (pip install xcodec2).
+         If installed, XCodec2Model.from_pretrained() is called directly.
+
+      3. AutoModel fallback with explicit CPU device_map.
+         Passing device_map={"": "cpu"} and torch_dtype=float32 prevents the
+         meta-device path that AutoModel normally uses for custom model types.
+         The codec is moved to the target device after loading.
+
+    Returns None on failure — caller logs the error and continues in degraded mode.
     """
     if not codec_path:
         logger.warning(
@@ -192,30 +205,110 @@ def load_codec(
     logger.info("Loading xcodec2 codec | path=%s | device=%s", codec_path, device)
     token = hf_token or None
 
-    try:
-        try:
-            from xcodec2.modeling_xcodec2 import XCodec2Model  # type: ignore[import]
-            codec = XCodec2Model.from_pretrained(codec_path, token=token)
-        except (ImportError, ModuleNotFoundError):
-            from transformers import AutoModel
-            codec = AutoModel.from_pretrained(codec_path, trust_remote_code=True, token=token)
+    last_exc: Optional[Exception] = None
 
+    # ── Strategy 1: direct local import (avoids AutoModel meta-device bug) ───
+    if os.path.isdir(codec_path):
+        try:
+            codec = _load_codec_direct_import(codec_path, device, token)
+            logger.info("xcodec2 loaded via direct import | device=%s", device)
+            return codec
+        except Exception as exc:
+            logger.debug("Direct import failed: %s — trying next strategy.", exc)
+            last_exc = exc
+
+    # ── Strategy 2: xcodec2 pip package ──────────────────────────────────────
+    try:
+        from xcodec2.modeling_xcodec2 import XCodec2Model  # type: ignore[import]
+        codec = XCodec2Model.from_pretrained(codec_path, token=token)
         codec = codec.to(device).eval()
-        logger.info("xcodec2 codec loaded successfully | device=%s", device)
+        logger.info("xcodec2 loaded via xcodec2 pip package | device=%s", device)
+        return codec
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.debug("xcodec2 package load failed: %s — trying next strategy.", exc)
+        last_exc = exc
+
+    # ── Strategy 3: AutoModel with forced CPU device_map ─────────────────────
+    try:
+        import torch
+        from transformers import AutoModel
+        codec = AutoModel.from_pretrained(
+            codec_path,
+            trust_remote_code=True,
+            token=token,
+            torch_dtype=torch.float32,
+            device_map={"": "cpu"},   # prevents meta-device initialization
+        )
+        codec = codec.to(device).eval()
+        logger.info("xcodec2 loaded via AutoModel CPU fallback | device=%s", device)
+        return codec
+    except Exception as exc:
+        last_exc = exc
+
+    logger.error(
+        "Failed to load xcodec2 codec from '%s': %s\n"
+        "Generations will fall back to silent WAV.\n"
+        "Fix options:\n"
+        "  • Set YUE_CODEC_PATH to a local directory with pre-downloaded codec weights.\n"
+        "  • If the repo is gated, set YUE_HF_TOKEN to your HuggingFace token.\n"
+        "  • Run: pip install xcodec2  (if the xcodec2 package is available).\n"
+        "  • Set YUE_REPO_PATH to a cloned HKUSTAudio/YuE repo for native inference.",
+        codec_path, last_exc,
+    )
+    return None
+
+
+def _load_codec_direct_import(codec_path: str, device: Any, token: Optional[str]) -> Any:
+    """
+    Load xcodec2 by injecting its directory onto sys.path and importing
+    the model class directly, bypassing AutoModel's type-mapping logic
+    that triggers the meta-device anti-pattern.
+
+    Looks for (in order):
+      modeling_xcodec2.py   → XCodec2Model
+      modeling_xcodec.py    → XCodec2Model or first PreTrainedModel subclass
+    """
+    import sys
+    import inspect
+
+    codec_dir = os.path.abspath(codec_path)
+    inserted = codec_dir not in sys.path
+    if inserted:
+        sys.path.insert(0, codec_dir)
+
+    try:
+        model_cls = None
+
+        for module_name, class_names in [
+            ("modeling_xcodec2", ["XCodec2Model"]),
+            ("modeling_xcodec",  ["XCodec2Model", "XCodecModel"]),
+        ]:
+            try:
+                mod = __import__(module_name)
+                for cls_name in class_names:
+                    if hasattr(mod, cls_name):
+                        model_cls = getattr(mod, cls_name)
+                        break
+                if model_cls:
+                    break
+            except ImportError:
+                continue
+
+        if model_cls is None:
+            raise ImportError(
+                f"No recognisable xcodec2 model class found in {codec_dir}. "
+                f"Expected modeling_xcodec2.py with XCodec2Model."
+            )
+
+        codec = model_cls.from_pretrained(codec_path, token=token)
+        codec = codec.to(device).eval()
         return codec
 
-    except Exception as exc:
-        logger.error(
-            "Failed to load xcodec2 codec from '%s': %s\n"
-            "Generations will fall back to silent WAV.\n"
-            "Fix options:\n"
-            "  • Set YUE_CODEC_PATH to a local directory with pre-downloaded codec weights.\n"
-            "  • If the repo is gated, set YUE_HF_TOKEN to your HuggingFace token.\n"
-            "  • Run: pip install xcodec2  (if the xcodec2 package is available).\n"
-            "  • Set YUE_REPO_PATH to a cloned HKUSTAudio/YuE repo for native inference.",
-            codec_path, exc,
-        )
-        return None
+    finally:
+        if inserted and codec_dir in sys.path:
+            sys.path.remove(codec_dir)
 
 
 # ─── Public inference entry-point ─────────────────────────────────────────────
