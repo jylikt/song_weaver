@@ -1,0 +1,150 @@
+Technical Specification: Fix YuE Model Loading and Inference Compatibility in gpu-worker
+1. Objective
+Fix artifacts/gpu-worker so that it can load and run inference with the selected YuE checkpoint (HKUSTAudio/YuE-s1-7B-anneal-en-icl) without runtime model-class mismatch errors.
+
+Current failure:
+
+Worker attempts AutoModelForSeq2SeqLM.from_pretrained(...)
+Checkpoint config is LlamaConfig
+Load fails with: Unrecognized configuration class LlamaConfig for AutoModelForSeq2SeqLM
+2. Problem Statement
+The current worker integration assumes a seq2seq model API (AutoModelForSeq2SeqLM) and seq2seq-style processor/inference flow.
+The target checkpoint is Llama-family (decoder-only), so:
+
+model loader class is wrong;
+inference path assumptions are wrong;
+output extraction (outputs.audio_values) is likely incompatible with this checkpoint’s actual runtime pipeline.
+3. Scope
+In Scope
+Replace incorrect model loading class selection with architecture-aware loading.
+Implement YuE-compatible inference pipeline for the chosen checkpoint.
+Preserve existing worker HTTP contract (/health, /load-model, /generate, /output, /unload-model).
+Keep compatibility with song-gen remote worker client contract.
+Improve diagnostics for unsupported model architecture/config.
+Out of Scope
+Full fine-tuning/training pipeline.
+Frontend changes.
+Major API contract redesign between song-gen and gpu-worker.
+4. Functional Requirements
+FR-1: Architecture-Aware Model Loading
+File: artifacts/gpu-worker/app/state.py
+In load_model():
+detect model config type before loading (e.g., via AutoConfig.from_pretrained()).
+select proper loader:
+Llama/decoder-only path -> AutoModelForCausalLM or YuE-specific model class.
+seq2seq path (if supported) -> AutoModelForSeq2SeqLM.
+reject unsupported configs with clear, actionable error messages.
+Acceptance:
+
+/load-model succeeds for HKUSTAudio/YuE-s1-7B-anneal-en-icl when dependencies are correctly installed.
+/load-model returns 4xx/5xx with explicit reason if architecture is unsupported by current code path.
+FR-2: YuE-Compatible Inference Path
+File: artifacts/gpu-worker/app/routes/generate.py
+Replace current seq2seq-specific generation logic with the correct YuE runtime flow for the selected checkpoint.
+Required behavior:
+consume prompt, lyrics, style_preset, duration_sec, seed;
+run generation according to YuE’s expected API (pipeline or model-specific method);
+produce valid waveform tensor/array;
+save WAV to OUTPUT_DIR/{job_id}.wav;
+return existing response schema with audio_url.
+Acceptance:
+
+/generate produces playable non-empty WAV for valid requests.
+Worker no longer depends on outputs.audio_values unless the active YuE API actually returns that structure.
+FR-3: Backward-Compatible HTTP Contract
+No breaking changes to:
+
+POST /load-model
+POST /generate
+POST /unload-model
+GET /health
+GET /output/{filename}
+GenerateResponse must still include:
+
+job_id
+audio_url
+duration_sec
+model_name
+provider
+FR-4: Health and Runtime Transparency
+/health must clearly indicate:
+model_loaded
+model_name
+stub_mode
+device (cpu/cuda)
+On model-load failure, logs must include:
+model path/repo,
+detected config class,
+selected loader path,
+root exception.
+5. Non-Functional Requirements
+NFR-1: Robust Error Handling
+Transform internal loader/inference errors into explicit API-level messages.
+Avoid generic “Unexpected error” where actionable detail is possible.
+NFR-2: Deterministic Seed Handling
+If seed is provided, apply deterministic seed setup consistently in the selected YuE path (where supported).
+NFR-3: Operational Stability
+Keep existing async/threadpool behavior (no event-loop blocking).
+Ensure unload clears references and CUDA cache safely.
+6. Implementation Guidelines
+Introduce model-family routing in state.py:
+read config class first;
+map config class -> loader strategy.
+Extract YuE runtime adapter into a dedicated helper (optional but recommended), e.g.:
+app/yue_adapter.py
+In generate.py, delegate to adapter rather than direct seq2seq assumptions.
+Keep stub mode unchanged when YUE_MODEL_PATH is empty.
+Keep env-driven settings (YUE_DEVICE, YUE_DTYPE, etc.).
+7. Dependencies
+Validate and pin required runtime stack for selected YuE path:
+
+torch
+transformers
+accelerate
+safetensors
+any YuE-specific package/runtime required by checkpoint docs
+audio writer dependency (torchaudio or soundfile)
+If the checkpoint requires trust_remote_code=True, this must be explicit and configurable.
+
+8. Configuration Requirements
+No required API contract changes.
+Optional additions (if needed):
+
+YUE_TRUST_REMOTE_CODE=true|false
+YUE_MODEL_FAMILY=auto|causal|seq2seq|pipeline
+YUE_GENERATION_BACKEND=transformers|yue_native
+Defaults must preserve current behavior for existing users where possible.
+
+9. Test Plan
+Unit/Component
+Config detection returns expected family for LlamaConfig.
+Loader strategy selection routes Llama to causal/YuE path.
+Unsupported config raises clear error.
+API Smoke
+POST /load-model with HKUSTAudio/YuE-s1-7B-anneal-en-icl succeeds.
+GET /health shows model_loaded=true, stub_mode=false.
+POST /generate returns 200 and valid audio_url.
+GET audio_url returns playable WAV with non-zero size.
+POST /unload-model succeeds and health reflects unloaded state.
+Negative
+Invalid YUE_MODEL_PATH -> clear load error.
+Missing required dependency -> clear load error with package hint.
+Duration above cap -> 422 (unchanged behavior).
+10. Deliverables
+Updated artifacts/gpu-worker/app/state.py (architecture-aware loader).
+Updated artifacts/gpu-worker/app/routes/generate.py (YuE-compatible inference).
+Optional adapter module and tests.
+Updated docs:
+expected checkpoint types,
+supported model families,
+known limitations.
+Evidence:
+successful /load-model and /generate logs,
+sample WAV output.
+11. Acceptance Criteria
+The fix is accepted when all are true:
+
+Loading HKUSTAudio/YuE-s1-7B-anneal-en-icl no longer fails with seq2seq mismatch.
+/generate completes and returns real audio output (non-stub) for valid inputs.
+Existing song-gen integration works without API contract changes.
+Error messages are actionable for unsupported model types or missing dependencies.
