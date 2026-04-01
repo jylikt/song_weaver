@@ -90,6 +90,7 @@ class WorkerState:
         # Populated by load_model(); consumed by _run_inference() in generate.py
         self._model: Optional[Any] = None
         self._processor: Optional[Any] = None
+        self._codec: Optional[Any] = None          # xcodec2 codec model
         self._device: Optional[Any] = None         # torch.device
         self._torch_dtype: Optional[Any] = None    # torch dtype
         self._model_family: Optional[str] = None   # 'causal' | 'seq2seq'
@@ -115,7 +116,7 @@ class WorkerState:
         Raises RuntimeError with actionable messages on any failure.
         """
         from app.config import ModelFamily, settings
-        from app.yue_adapter import detect_model_family, load_model_and_processor
+        from app.yue_adapter import detect_model_family, load_codec, load_model_and_processor
 
         async with self.lock:
             model_path = settings.yue_model_path or ""
@@ -213,6 +214,17 @@ class WorkerState:
             self._torch_dtype = torch_dtype
             self._model_family = family
 
+            # ── Load xcodec2 codec (needed for causal/YuE audio decoding) ─────
+            # load_codec() returns None on failure and logs a clear error — the
+            # worker stays functional in stub-style degraded mode.
+            if family == "causal" and settings.yue_codec_path:
+                self._codec = load_codec(
+                    codec_path=settings.yue_codec_path,
+                    device=device,
+                )
+            else:
+                self._codec = None
+
             elapsed = time.perf_counter() - t_start
 
             self.model.loaded = True
@@ -251,6 +263,9 @@ class WorkerState:
             if self._processor is not None:
                 del self._processor
                 self._processor = None
+            if self._codec is not None:
+                del self._codec
+                self._codec = None
             self._device = None
             self._torch_dtype = None
             self._model_family = None

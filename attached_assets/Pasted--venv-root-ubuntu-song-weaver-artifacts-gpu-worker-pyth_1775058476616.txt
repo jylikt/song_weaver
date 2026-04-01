@@ -1,0 +1,29 @@
+(.venv) root@ubuntu:~/song_weaver/artifacts/gpu-worker# python main.py
+INFO:     Will watch for changes in these directories: ['/root/song_weaver/artifacts/gpu-worker']
+INFO:     Uvicorn running on http://0.0.0.0:9000 (Press CTRL+C to quit)
+INFO:     Started reloader process [2868] using WatchFiles
+INFO:     Started server process [2870]
+INFO:     Waiting for application startup.
+2026-04-01 15:43:02,487 [INFO] app.main — GPU Worker started | env=production | default_model=yue-base | yue_path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | auth=enabled
+INFO:     Application startup complete.
+INFO:     127.0.0.1:40982 - "GET /health HTTP/1.1" 200 OK
+2026-04-01 15:43:08,061 [INFO] app.state — Loading YuE model | path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | trust_remote_code=False
+2026-04-01 15:43:08,154 [INFO] watchfiles.main — 3 changes detected
+2026-04-01 15:43:09,534 [INFO] app.yue_adapter — Detecting model architecture | path=/root/YuE-s1-7B-anneal-en-icl
+2026-04-01 15:43:09,536 [INFO] app.yue_adapter — Detected config class: LlamaConfig
+2026-04-01 15:43:09,536 [INFO] app.yue_adapter — Resolved model family: causal (Llama/decoder-only path)
+2026-04-01 15:43:09,536 [INFO] app.state — Resolved model family: causal
+2026-04-01 15:43:09,552 [INFO] app.yue_adapter — Loading causal LM (AutoModelForCausalLM) | path=/root/YuE-s1-7B-anneal-en-icl
+Loading checkpoint shards: 100%|██████████████████████████████████████████████████████████| 3/3 [00:01<00:00,  2.26it/s]
+You are using the default legacy behaviour of the <class 'transformers.models.llama.tokenization_llama.LlamaTokenizer'>. This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it means, and thoroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565 - if you loaded a llama tokenizer from a GGUF file you can ignore this message
+You are using the default legacy behaviour of the <class 'transformers.models.llama.tokenization_llama_fast.LlamaTokenizerFast'>. This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it means, and thoroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565 - if you loaded a llama tokenizer from a GGUF file you can ignore this message.
+2026-04-01 15:43:13,933 [INFO] app.yue_adapter — Causal model + tokenizer loaded successfully
+2026-04-01 15:43:13,934 [INFO] app.state — YuE model ready | model=yue-base | family=causal | device=cuda | dtype=fp16 | load_time=5.9s
+INFO:     127.0.0.1:40982 - "POST /load-model HTTP/1.1" 200 OK
+2026-04-01 15:43:14,237 [INFO] app.routes.generate — Generation start | job=479f9561-ea15-48e9-8b80-2c291758d1e2 | model=yue-base | family=causal | stub=False | style=hip_hop | duration=30s | seed=None
+Setting `pad_token_id` to `eos_token_id`:2 for open-end generation.
+2026-04-01 15:44:28,440 [WARNING] app.yue_adapter — Audio token decoding failed (job=479f9561-ea15-48e9-8b80-2c291758d1e2): Model does not expose a known audio decoding interface (decode_audio, codec, or audio_encoder). Ensure the checkpoint is loaded with trust_remote_code=True.. Writing silent WAV — set YUE_TRUST_REMOTE_CODE=true and ensure the YuE codec weights are downloaded to enable real audio output.
+2026-04-01 15:44:28,444 [INFO] app.routes.generate — Generation complete | job=479f9561-ea15-48e9-8b80-2c291758d1e2 | size=1440044 bytes | url=http://localhost:9000/output/479f9561-ea15-48e9-8b80-2c291758d1e2.wav
+INFO:     127.0.0.1:40982 - "POST /generate HTTP/1.1" 200 OK
+2026-04-01 15:44:28,517 [INFO] watchfiles.main — 1 change detected
+INFO:     127.0.0.1:40982 - "GET /output/479f9561-ea15-48e9-8b80-2c291758d1e2.wav HTTP/1.1" 200 OK

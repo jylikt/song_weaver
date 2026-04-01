@@ -82,6 +82,17 @@ class Settings(BaseSettings):
     # Song-gen's REMOTE_WORKER_TIMEOUT_SEC should be set higher than this.
     generation_timeout_sec: int = 240
 
+    # ── Codec configuration ───────────────────────────────────────────────────
+    # XCodec2 model used to decode the audio codec tokens produced by the LLM.
+    # HKUSTAudio/YuE uses m-a-p/xcodec2. Set to a local path if already
+    # downloaded, or leave as the HF repo id to download on first use.
+    # Set to empty string to disable codec loading (generation will fall back
+    # to a silent WAV with a clear error in the logs).
+    yue_codec_path: str = "m-a-p/xcodec2"
+
+    # Number of RVQ codebooks in the codec (8 for standard xcodec2).
+    yue_codec_n_codebooks: int = 8
+
     # ── Architecture / backend overrides ─────────────────────────────────────
     # Set to true if the checkpoint requires custom code (e.g. HKUSTAudio/YuE).
     # When AUTO, the worker will attempt to detect this from the model config.

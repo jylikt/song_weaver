@@ -4,19 +4,27 @@ YuE inference adapter.
 This module handles the YuE-specific inference pipeline, isolating all
 model-family and checkpoint-format concerns away from the HTTP layer.
 
-Supported model families:
-  - causal  (Llama-based, e.g. HKUSTAudio/YuE-s1-7B-anneal-en-icl)
-  - seq2seq (encoder-decoder, e.g. hypothetical AudioCraft-style checkpoints)
+How YuE causal inference works
+-------------------------------
+HKUSTAudio/YuE-s1-7B-anneal-en-icl is a Llama model fine-tuned to generate
+*audio codec tokens* rather than text.  The pipeline has two distinct stages:
 
-Architecture detection
-----------------------
-Call detect_model_family(model_path) before loading to resolve which loader
-and inference path to use. This reads only the config file (fast, no weights).
+  Stage 1 — LLM generation (this file, _run_causal_inference):
+    Formatted prompt (genre + lyrics) is tokenised with the Llama tokenizer.
+    model.generate() produces a flat sequence of token IDs.
+    Token IDs >= text_vocab_size are audio codec tokens; the rest are text.
 
-Inference
----------
-run_yue_inference(body, output_path, state) is the single entry-point used by
-generate.py. It dispatches to the correct path based on the loaded model family.
+  Stage 2 — Codec decoding (_decode_with_xcodec2):
+    Audio token IDs are shifted down by text_vocab_size to get raw code indices.
+    Codes are reshaped to (1, n_codebooks, seq_len) — xcodec2 uses 8 codebooks.
+    The xcodec2 codec model decodes these to a waveform tensor.
+    The waveform is saved as a WAV file.
+
+Codec model
+-----------
+Load via load_codec(codec_path, device).  The default codec path is
+"m-a-p/xcodec2" (HuggingFace repo id).  Set YUE_CODEC_PATH to a local
+directory if you've already downloaded the codec weights.
 """
 
 from __future__ import annotations
@@ -26,38 +34,22 @@ import random
 import struct
 import wave
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from app.models import GenerateRequest
 
 logger = logging.getLogger(__name__)
 
-# ── Known Llama-family config class names ─────────────────────────────────────
+# ── Known config class → model family mappings ────────────────────────────────
 _CAUSAL_CONFIG_CLASSES = {
-    "LlamaConfig",
-    "MistralConfig",
-    "QwenConfig",
-    "Qwen2Config",
-    "FalconConfig",
-    "GPTNeoXConfig",
-    "GPT2Config",
-    "GPTJConfig",
-    "OPTConfig",
-    "BloomConfig",
-    "MPTConfig",
-    "RWConfig",
-    "InternLMConfig",
+    "LlamaConfig", "MistralConfig", "QwenConfig", "Qwen2Config",
+    "FalconConfig", "GPTNeoXConfig", "GPT2Config", "GPTJConfig",
+    "OPTConfig", "BloomConfig", "MPTConfig", "RWConfig", "InternLMConfig",
 }
-
 _SEQ2SEQ_CONFIG_CLASSES = {
-    "T5Config",
-    "BartConfig",
-    "PegasusConfig",
-    "MBartConfig",
-    "MarianConfig",
-    "MusicgenConfig",
-    "EncoderDecoderConfig",
+    "T5Config", "BartConfig", "PegasusConfig", "MBartConfig",
+    "MarianConfig", "MusicgenConfig", "EncoderDecoderConfig",
 }
 
 
@@ -65,12 +57,10 @@ _SEQ2SEQ_CONFIG_CLASSES = {
 
 def detect_model_family(model_path: str, trust_remote_code: bool = False) -> str:
     """
-    Load only the model config (no weights) and return the resolved family string:
-      'causal'  — Llama / decoder-only models
-      'seq2seq' — encoder-decoder models
+    Inspect the model config (no weights loaded) and return the family string:
+      'causal'  — Llama / decoder-only
+      'seq2seq' — encoder-decoder
       'unknown' — unrecognised; caller should raise an error
-
-    Raises RuntimeError with actionable message on any load failure.
     """
     try:
         from transformers import AutoConfig
@@ -81,10 +71,7 @@ def detect_model_family(model_path: str, trust_remote_code: bool = False) -> str
 
     logger.info("Detecting model architecture | path=%s", model_path)
     try:
-        config = AutoConfig.from_pretrained(
-            model_path,
-            trust_remote_code=trust_remote_code,
-        )
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
     except OSError as exc:
         raise RuntimeError(
             f"Cannot read model config from '{model_path}'. "
@@ -102,31 +89,28 @@ def detect_model_family(model_path: str, trust_remote_code: bool = False) -> str
     if config_class in _CAUSAL_CONFIG_CLASSES:
         logger.info("Resolved model family: causal (Llama/decoder-only path)")
         return "causal"
-
     if config_class in _SEQ2SEQ_CONFIG_CLASSES:
         logger.info("Resolved model family: seq2seq (encoder-decoder path)")
         return "seq2seq"
 
-    # Heuristic fallback: check is_decoder / model_type fields
+    # Heuristic via model_type field
     model_type = getattr(config, "model_type", "").lower()
     if model_type in {"llama", "mistral", "qwen2", "qwen", "falcon", "gpt_neox", "gpt2", "gptj", "opt", "bloom"}:
-        logger.info("Resolved model family via model_type field: causal (%s)", model_type)
+        logger.info("Resolved model family via model_type: causal (%s)", model_type)
         return "causal"
-
     if model_type in {"t5", "bart", "pegasus", "mbart", "marian", "musicgen"}:
-        logger.info("Resolved model family via model_type field: seq2seq (%s)", model_type)
+        logger.info("Resolved model family via model_type: seq2seq (%s)", model_type)
         return "seq2seq"
 
     logger.warning(
         "Unrecognised config class '%s' (model_type='%s'). "
         "Set YUE_MODEL_FAMILY=causal or YUE_MODEL_FAMILY=seq2seq to override.",
-        config_class,
-        model_type,
+        config_class, model_type,
     )
     return "unknown"
 
 
-# ─── Model loader ─────────────────────────────────────────────────────────────
+# ─── Model + codec loaders ────────────────────────────────────────────────────
 
 def load_model_and_processor(
     model_path: str,
@@ -136,60 +120,40 @@ def load_model_and_processor(
     trust_remote_code: bool = False,
 ) -> tuple[Any, Any]:
     """
-    Load model + tokenizer/processor for the given family.
-
-    Returns (model, processor) where processor is a tokenizer for causal
-    models or an AutoProcessor for seq2seq models.
-
-    Raises RuntimeError with actionable messages on failure.
+    Load LLM + tokenizer/processor for the given family.
+    Returns (model, processor).
     """
     try:
-        import torch  # noqa: F401 — ensure torch is available
         from transformers import (
-            AutoModelForCausalLM,
-            AutoModelForSeq2SeqLM,
-            AutoProcessor,
-            AutoTokenizer,
+            AutoModelForCausalLM, AutoModelForSeq2SeqLM,
+            AutoProcessor, AutoTokenizer,
         )
     except ImportError as exc:
         raise RuntimeError(
             "transformers is not installed. Run: pip install transformers accelerate"
         ) from exc
 
-    common_kwargs: dict[str, Any] = {
-        "torch_dtype": torch_dtype,
-        "low_cpu_mem_usage": True,
-        "trust_remote_code": trust_remote_code,
-    }
+    common = dict(torch_dtype=torch_dtype, low_cpu_mem_usage=True, trust_remote_code=trust_remote_code)
 
     try:
         if family == "causal":
             logger.info("Loading causal LM (AutoModelForCausalLM) | path=%s", model_path)
-            model = AutoModelForCausalLM.from_pretrained(model_path, **common_kwargs)
-            model = model.to(device)
-            model.eval()
-            processor = AutoTokenizer.from_pretrained(
-                model_path,
-                trust_remote_code=trust_remote_code,
-            )
+            model = AutoModelForCausalLM.from_pretrained(model_path, **common)
+            model = model.to(device).eval()
+            processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
             logger.info("Causal model + tokenizer loaded successfully")
 
         elif family == "seq2seq":
             logger.info("Loading seq2seq LM (AutoModelForSeq2SeqLM) | path=%s", model_path)
-            model = AutoModelForSeq2SeqLM.from_pretrained(model_path, **common_kwargs)
-            model = model.to(device)
-            model.eval()
-            processor = AutoProcessor.from_pretrained(
-                model_path,
-                trust_remote_code=trust_remote_code,
-            )
+            model = AutoModelForSeq2SeqLM.from_pretrained(model_path, **common)
+            model = model.to(device).eval()
+            processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=trust_remote_code)
             logger.info("Seq2seq model + processor loaded successfully")
 
         else:
             raise RuntimeError(
                 f"Unsupported model family '{family}'. "
-                f"Set YUE_MODEL_FAMILY=causal or YUE_MODEL_FAMILY=seq2seq explicitly. "
-                f"Detected config class was not in any known family mapping."
+                f"Set YUE_MODEL_FAMILY=causal or YUE_MODEL_FAMILY=seq2seq explicitly."
             )
 
     except RuntimeError:
@@ -197,7 +161,7 @@ def load_model_and_processor(
     except OSError as exc:
         raise RuntimeError(
             f"Could not load checkpoint from '{model_path}'. "
-            f"Verify YUE_MODEL_PATH points to a valid directory or HuggingFace repo id. "
+            f"Verify YUE_MODEL_PATH is a valid directory or HuggingFace repo id. "
             f"Original error: {exc}"
         ) from exc
     except Exception as exc:
@@ -208,7 +172,51 @@ def load_model_and_processor(
     return model, processor
 
 
-# ─── Inference ────────────────────────────────────────────────────────────────
+def load_codec(codec_path: str, device: Any) -> Optional[Any]:
+    """
+    Load the xcodec2 codec model used to decode YuE audio tokens to waveforms.
+
+    The codec is loaded with trust_remote_code=True because xcodec2 ships its
+    own modeling code on HuggingFace (m-a-p/xcodec2).
+
+    Returns the codec model on success, or None if loading fails (in which case
+    inference will fall back to a silent WAV with a clear log message).
+    """
+    if not codec_path:
+        logger.warning(
+            "YUE_CODEC_PATH is empty — codec loading skipped. "
+            "Generated audio will be a silent WAV. "
+            "Set YUE_CODEC_PATH=m-a-p/xcodec2 (or a local path) to enable real audio."
+        )
+        return None
+
+    logger.info("Loading xcodec2 codec | path=%s | device=%s", codec_path, device)
+
+    # Try the xcodec2 package first (pip install xcodec2), then fall back to
+    # AutoModel with trust_remote_code which works directly from the HF repo.
+    try:
+        try:
+            from xcodec2.modeling_xcodec2 import XCodec2Model  # type: ignore[import]
+            codec = XCodec2Model.from_pretrained(codec_path)
+        except (ImportError, ModuleNotFoundError):
+            from transformers import AutoModel
+            codec = AutoModel.from_pretrained(codec_path, trust_remote_code=True)
+
+        codec = codec.to(device).eval()
+        logger.info("xcodec2 codec loaded successfully | device=%s", device)
+        return codec
+
+    except Exception as exc:
+        logger.error(
+            "Failed to load xcodec2 codec from '%s': %s. "
+            "Generations will fall back to silent WAV. "
+            "Fix: ensure the codec path is correct and the model files are present.",
+            codec_path, exc,
+        )
+        return None
+
+
+# ─── Public inference entry-point ─────────────────────────────────────────────
 
 def run_yue_inference(
     body: "GenerateRequest",
@@ -217,15 +225,15 @@ def run_yue_inference(
     processor: Any,
     device: Any,
     family: str,
+    codec: Optional[Any],
+    n_codebooks: int,
     sample_rate: int,
     cfg_scale: float,
     num_steps: int,
 ) -> None:
     """
-    Blocking inference entry-point — called inside a ThreadPoolExecutor.
-
-    Dispatches to the appropriate inference path based on model family,
-    then writes the result as a WAV file at output_path.
+    Blocking inference dispatcher — called inside a ThreadPoolExecutor.
+    Routes to the correct path based on model family.
     """
     if family == "causal":
         _run_causal_inference(
@@ -234,8 +242,9 @@ def run_yue_inference(
             model=model,
             tokenizer=processor,
             device=device,
+            codec=codec,
+            n_codebooks=n_codebooks,
             sample_rate=sample_rate,
-            cfg_scale=cfg_scale,
         )
     elif family == "seq2seq":
         _run_seq2seq_inference(
@@ -249,12 +258,10 @@ def run_yue_inference(
             num_steps=num_steps,
         )
     else:
-        raise RuntimeError(
-            f"Cannot run inference: unsupported model family '{family}'."
-        )
+        raise RuntimeError(f"Cannot run inference: unsupported model family '{family}'.")
 
 
-# ─── Causal (Llama-based YuE) inference ──────────────────────────────────────
+# ─── Causal (Llama-based YuE + xcodec2) inference ────────────────────────────
 
 def _run_causal_inference(
     body: "GenerateRequest",
@@ -262,39 +269,40 @@ def _run_causal_inference(
     model: Any,
     tokenizer: Any,
     device: Any,
+    codec: Optional[Any],
+    n_codebooks: int,
     sample_rate: int,
-    cfg_scale: float,
 ) -> None:
     """
-    YuE causal / Llama inference path.
+    Full YuE causal inference pipeline:
 
-    HKUSTAudio/YuE-s1-7B-anneal-en-icl is a decoder-only model that generates
-    interleaved audio codec tokens. The pipeline:
-      1. Format prompt from genre description + lyrics.
-      2. Tokenize with the model's tokenizer.
-      3. Run causal generation to produce audio codec tokens.
-      4. Decode tokens to a waveform via the model's codec (if available)
-         or fall back to writing a silent WAV for stub-compatible testing.
-      5. Save WAV to output_path.
+      1. Seed RNG for reproducibility.
+      2. Format prompt (genre description + lyrics).
+      3. Tokenise — set pad_token = eos_token for Llama tokenizers.
+      4. Run model.generate() to produce audio codec token IDs.
+      5. Extract tokens with ID >= text_vocab_size (those are audio codes).
+      6. Shift down by text_vocab_size to get raw codec indices.
+      7. Reshape to (1, n_codebooks, seq_len) and decode with xcodec2.
+      8. Save waveform as WAV.
+
+    If the codec is not loaded, logs a clear error and writes a silent WAV
+    so the HTTP contract is always fulfilled.
     """
     import torch
 
-    # ── Reproducibility ────────────────────────────────────────────────────────
     _apply_seed(body.seed, device)
 
-    # ── Build prompt ───────────────────────────────────────────────────────────
+    # ── Prompt ────────────────────────────────────────────────────────────────
     genre_prompt = _build_genre_prompt(body.style_preset, body.prompt)
     full_prompt = _format_yue_prompt(genre_prompt, body.lyrics)
 
-    logger.debug(
-        "Causal inference | job=%s | prompt_len=%d | duration=%ds",
-        body.job_id,
-        len(full_prompt),
-        body.duration_sec,
+    logger.info(
+        "Causal inference start | job=%s | prompt_chars=%d | duration=%ds | codec_loaded=%s",
+        body.job_id, len(full_prompt), body.duration_sec, codec is not None,
     )
 
-    # ── Tokenise ───────────────────────────────────────────────────────────────
-    # LlamaTokenizer has no pad token by default — use eos_token as the pad.
+    # ── Tokenise ──────────────────────────────────────────────────────────────
+    # Llama tokenizers have no pad token by default — use eos_token.
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -307,14 +315,18 @@ def _run_causal_inference(
         max_length=2048,
     ).to(device)
 
-    # ── Estimate max new tokens for target duration ─────────────────────────
-    # YuE-s1 uses EnCodec at ~75 tokens/second (codec frame rate).
-    # Each "frame" packs 8 codebook entries, so the raw token count is:
-    #   duration_sec * codec_fps * num_codebooks
-    # For a simpler estimate we use 75 tokens/sec as a conservative cap.
-    max_new_tokens = body.duration_sec * 75
+    prompt_len = inputs["input_ids"].shape[1]
 
-    # ── Generate ───────────────────────────────────────────────────────────────
+    # ── Token budget ──────────────────────────────────────────────────────────
+    # xcodec2 runs at 75 frames/sec; each frame needs n_codebooks tokens.
+    # So 30 s @ 8 codebooks = 30 * 75 * 8 = 18 000 tokens.
+    max_new_tokens = body.duration_sec * 75 * n_codebooks
+    logger.info(
+        "Generating %d tokens (%d s × 75 fps × %d codebooks)",
+        max_new_tokens, body.duration_sec, n_codebooks,
+    )
+
+    # ── LLM generation ────────────────────────────────────────────────────────
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
@@ -323,97 +335,118 @@ def _run_causal_inference(
             temperature=0.9,
             top_p=0.95,
             repetition_penalty=1.1,
+            pad_token_id=tokenizer.eos_token_id,
         )
 
-    # ── Decode audio ───────────────────────────────────────────────────────────
-    # Attempt to use the model's built-in codec decoder (available when
-    # trust_remote_code=True loads the full YuE pipeline class).
-    # Fall back to a silent WAV so the HTTP contract is always satisfied.
-    try:
-        waveform = _decode_audio_tokens(model, output_ids, inputs["input_ids"], device, sample_rate)
-        _save_waveform(waveform, output_path, sample_rate)
-        logger.info("Causal inference complete | job=%s | waveform saved", body.job_id)
-    except Exception as exc:
-        logger.warning(
-            "Audio token decoding failed (job=%s): %s. "
-            "Writing silent WAV — set YUE_TRUST_REMOTE_CODE=true and ensure "
-            "the YuE codec weights are downloaded to enable real audio output.",
-            body.job_id,
-            exc,
+    # ── Extract audio codec tokens ────────────────────────────────────────────
+    # Strip the prompt prefix; keep only the newly generated tokens.
+    new_ids = output_ids[0, prompt_len:]  # shape: (n_generated,)
+
+    text_vocab_size = tokenizer.vocab_size  # e.g. 32000 for Llama-2
+    audio_mask = new_ids >= text_vocab_size
+    audio_codes_flat = new_ids[audio_mask] - text_vocab_size  # shift to codec index space
+
+    n_audio = audio_codes_flat.shape[0]
+    logger.info(
+        "Token extraction | total_generated=%d | audio_tokens=%d | text_vocab_size=%d",
+        new_ids.shape[0], n_audio, text_vocab_size,
+    )
+
+    if n_audio == 0:
+        raise RuntimeError(
+            f"No audio codec tokens found in model output (all {new_ids.shape[0]} tokens "
+            f"are below text_vocab_size={text_vocab_size}). "
+            f"The prompt format or model checkpoint may be incompatible."
         )
-        _write_silent_wav(output_path, body.duration_sec, sample_rate)
 
+    # ── Codec decoding ────────────────────────────────────────────────────────
+    if codec is None:
+        raise RuntimeError(
+            f"xcodec2 codec is not loaded (YUE_CODEC_PATH is empty or loading failed). "
+            f"Extracted {n_audio} audio codec tokens but cannot decode them. "
+            f"Set YUE_CODEC_PATH=m-a-p/xcodec2 (or a local path) and restart the worker."
+        )
 
-def _decode_audio_tokens(
-    model: Any,
-    output_ids: Any,
-    input_ids: Any,
-    device: Any,
-    sample_rate: int,
-) -> Any:
-    """
-    Attempt to extract and decode audio codec tokens from the generated ids.
-
-    YuE models loaded with trust_remote_code=True expose a decode_audio()
-    method or similar.  We try the known interface patterns and raise if
-    none succeed so the caller can fall back gracefully.
-    """
-    import torch
-
-    # Strip the prompt from the output to get only generated tokens
-    new_tokens = output_ids[:, input_ids.shape[-1]:]
-
-    # Pattern A — model.decode_audio() (YuE native pipeline)
-    if hasattr(model, "decode_audio"):
-        waveform = model.decode_audio(new_tokens)
-        return waveform
-
-    # Pattern B — model.codec.decode() (HF audio model pattern)
-    if hasattr(model, "codec"):
-        # codec tokens are typically [batch, num_codebooks, seq_len]
-        # YuE interleaves them so we need to reshape
-        codec = model.codec
-        audio_codes = new_tokens.unsqueeze(0)  # add codebook dim
-        waveform = codec.decode(audio_codes)[0]
-        return waveform
-
-    # Pattern C — model.audio_encoder.decode() (MusicGen-style)
-    if hasattr(model, "audio_encoder"):
-        audio_codes = new_tokens.unsqueeze(1)  # [batch, 1, seq_len]
-        waveform = model.audio_encoder.decode(audio_codes, [None])[0]
-        return waveform
-
-    raise NotImplementedError(
-        "Model does not expose a known audio decoding interface "
-        "(decode_audio, codec, or audio_encoder). "
-        "Ensure the checkpoint is loaded with trust_remote_code=True."
+    waveform = _decode_with_xcodec2(audio_codes_flat, codec, n_codebooks, device)
+    _save_waveform(waveform, output_path, sample_rate)
+    logger.info(
+        "Causal inference complete | job=%s | audio_tokens=%d | waveform_shape=%s",
+        body.job_id, n_audio, list(waveform.shape),
     )
 
 
-def _save_waveform(waveform: Any, output_path: Path, sample_rate: int) -> None:
-    """Save a torch waveform tensor to a WAV file."""
+def _decode_with_xcodec2(
+    audio_codes_flat: Any,
+    codec: Any,
+    n_codebooks: int,
+    device: Any,
+) -> Any:
+    """
+    Decode a flat sequence of codec token indices to a waveform.
+
+    audio_codes_flat — 1-D tensor of codec code indices (already shifted, i.e.
+                       the text vocab offset has been subtracted).
+
+    xcodec2 uses RVQ with n_codebooks (default 8) codebooks.
+    YuE interleaves codes: for each time step the model generates one code per
+    codebook in order, so the flat sequence looks like:
+        [t0_cb0, t0_cb1, ..., t0_cb7, t1_cb0, t1_cb1, ..., t1_cb7, ...]
+
+    We reshape to (1, n_codebooks, seq_len) and call the codec decoder.
+    """
     import torch
 
-    # Normalise shape to [channels, samples]
-    if waveform.dim() == 3:
-        waveform = waveform.squeeze(0)  # [1, channels, samples] -> [channels, samples]
-    if waveform.dim() == 1:
-        waveform = waveform.unsqueeze(0)  # [samples] -> [1, samples]
+    n_total = audio_codes_flat.shape[0]
 
-    waveform_cpu = waveform.cpu().float()
+    # Truncate to the largest multiple of n_codebooks
+    remainder = n_total % n_codebooks
+    if remainder:
+        logger.warning(
+            "Audio token count %d is not divisible by n_codebooks=%d — "
+            "dropping last %d tokens.",
+            n_total, n_codebooks, remainder,
+        )
+        audio_codes_flat = audio_codes_flat[: n_total - remainder]
 
-    try:
-        import torchaudio
-        torchaudio.save(str(output_path), waveform_cpu, sample_rate)
-        return
-    except ImportError:
-        pass
+    seq_len = audio_codes_flat.shape[0] // n_codebooks
 
-    # Fallback: soundfile
-    import numpy as np
-    import soundfile as sf
-    audio_np = waveform_cpu.numpy().T  # soundfile expects [samples, channels]
-    sf.write(str(output_path), audio_np, sample_rate, subtype="PCM_16")
+    # Reshape: (seq_len * n_codebooks,) → (1, n_codebooks, seq_len)
+    codes = audio_codes_flat.reshape(seq_len, n_codebooks).T.unsqueeze(0)
+    # codes shape: (1, n_codebooks, seq_len)
+    codes = codes.to(device)
+
+    logger.info(
+        "Decoding codec tokens | shape=%s | n_codebooks=%d | seq_len=%d",
+        list(codes.shape), n_codebooks, seq_len,
+    )
+
+    with torch.no_grad():
+        # Try the known xcodec2 decoding interfaces in order of preference.
+
+        # Interface A — XCodec2Model.decode_code() (xcodec2 package / HF repo)
+        if hasattr(codec, "decode_code"):
+            waveform = codec.decode_code(codes)
+            return waveform
+
+        # Interface B — codec.decode() (some xcodec2 versions use this name)
+        if hasattr(codec, "decode"):
+            waveform = codec.decode(codes)
+            # Some implementations return (waveform, ...) tuple
+            if isinstance(waveform, (tuple, list)):
+                waveform = waveform[0]
+            return waveform
+
+        # Interface C — codec.quantizer.decode() + codec.decoder()
+        if hasattr(codec, "quantizer") and hasattr(codec, "decoder"):
+            embeddings = codec.quantizer.decode(codes)
+            waveform = codec.decoder(embeddings)
+            return waveform
+
+        raise RuntimeError(
+            "xcodec2 codec does not expose a known decoding interface "
+            "(decode_code, decode, or quantizer+decoder). "
+            "Check that the loaded model at YUE_CODEC_PATH is actually xcodec2."
+        )
 
 
 # ─── Seq2seq inference ────────────────────────────────────────────────────────
@@ -428,28 +461,16 @@ def _run_seq2seq_inference(
     cfg_scale: float,
     num_steps: int,
 ) -> None:
-    """
-    Seq2seq / encoder-decoder inference path.
-
-    Used for MusicGen-style or other encoder-decoder checkpoints.
-    If outputs.audio_values is present (MusicGen API), uses that directly.
-    """
+    """Encoder-decoder inference path (MusicGen-style checkpoints)."""
     import torch
 
     _apply_seed(body.seed, device)
-
     genre_prompt = _build_genre_prompt(body.style_preset, body.prompt)
 
-    inputs = processor(
-        text=genre_prompt,
-        lyrics=body.lyrics if hasattr(processor, "lyrics") else None,
-        return_tensors="pt",
-        padding=True,
-    )
-    # Remove None values before moving to device
+    inputs = processor(text=genre_prompt, return_tensors="pt", padding=True)
     inputs = {k: v.to(device) for k, v in inputs.items() if v is not None}
 
-    max_new_tokens = _duration_to_tokens(body.duration_sec, sample_rate)
+    max_new_tokens = body.duration_sec * 75
 
     with torch.no_grad():
         outputs = model.generate(
@@ -457,16 +478,12 @@ def _run_seq2seq_inference(
             max_new_tokens=max_new_tokens,
             do_sample=True,
             guidance_scale=cfg_scale,
-            num_inference_steps=num_steps,
         )
 
-    # MusicGen / AudioGen output structure
     if hasattr(outputs, "audio_values"):
-        audio_values = outputs.audio_values
-        out_sample_rate = getattr(outputs, "sample_rate", sample_rate)
-        _save_waveform(audio_values[0], output_path, out_sample_rate)
+        out_sr = getattr(outputs, "sample_rate", sample_rate)
+        _save_waveform(outputs.audio_values[0], output_path, out_sr)
     else:
-        # Treat raw output ids as audio codec tokens
         _save_waveform(outputs.float(), output_path, sample_rate)
 
     logger.info("Seq2seq inference complete | job=%s", body.job_id)
@@ -510,26 +527,46 @@ def _build_genre_prompt(style_preset: str, user_prompt: str) -> str:
 
 def _format_yue_prompt(genre_prompt: str, lyrics: str) -> str:
     """
-    Format the full input prompt for YuE causal models.
+    Format the full input prompt for YuE-s1-7B-anneal-en-icl.
 
-    YuE-s1-7B uses a structured prompt format with explicit section markers.
-    Adjust the template if your checkpoint uses a different convention.
+    YuE-s1 uses a genre+lyrics conditioning format. The model was trained with
+    the genre description followed by formatted lyrics. Adjust if your
+    checkpoint uses a different template.
     """
     return (
-        f"[INST] Generate a song with the following style and lyrics.\n\n"
-        f"Genre/Style: {genre_prompt}\n\n"
-        f"Lyrics:\n{lyrics}\n [/INST]"
+        f"Generate music.\n"
+        f"Genre: {genre_prompt}\n\n"
+        f"Lyrics:\n{lyrics}\n"
     )
 
 
-def _duration_to_tokens(duration_sec: int, sample_rate: int) -> int:
-    """Approximate token count for target duration (EnCodec @ 75 tokens/sec)."""
-    codec_frame_rate = 75
-    return duration_sec * codec_frame_rate
+def _save_waveform(waveform: Any, output_path: Path, sample_rate: int) -> None:
+    """Save a torch waveform tensor to a WAV file."""
+    import torch  # noqa: F401
+
+    # Normalise to [channels, samples]
+    if waveform.dim() == 3:
+        waveform = waveform.squeeze(0)
+    if waveform.dim() == 1:
+        waveform = waveform.unsqueeze(0)
+
+    waveform_cpu = waveform.cpu().float()
+
+    try:
+        import torchaudio
+        torchaudio.save(str(output_path), waveform_cpu, sample_rate)
+        return
+    except ImportError:
+        pass
+
+    import numpy as np
+    import soundfile as sf
+    audio_np = waveform_cpu.numpy().T
+    sf.write(str(output_path), audio_np, sample_rate, subtype="PCM_16")
 
 
 def _write_silent_wav(path: Path, duration_sec: int, sample_rate: int = 44100) -> None:
-    """Write a silent mono PCM WAV — stub fallback."""
+    """Write a silent mono PCM WAV — stub/fallback only."""
     num_samples = sample_rate * duration_sec
     with wave.open(str(path), "w") as wf:
         wf.setnchannels(1)

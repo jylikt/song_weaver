@@ -186,6 +186,8 @@ def _run_inference(
         processor=worker_state._processor,
         device=worker_state._device,
         family=model_family,
+        codec=worker_state._codec,
+        n_codebooks=settings.yue_codec_n_codebooks,
         sample_rate=settings.yue_sample_rate,
         cfg_scale=settings.yue_cfg_scale,
         num_steps=settings.yue_num_steps,
