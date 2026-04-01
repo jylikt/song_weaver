@@ -1,0 +1,46 @@
+Technical brief: GPU worker — XCodec2 codec loading failures (YuE pipeline)
+Context
+The gpu-worker (artifacts/gpu-worker) loads a YuE causal LM first, then an XCodec2 neural codec from a local directory (e.g. /root/xcodec2) produced by downloading HKUSTAudio/xcodec2 from the Hugging Face Hub. The codec is required to decode YuE audio tokens into a waveform. If loading fails, the worker falls back to silent WAV (codec_loaded=False).
+
+Official usage for this model is documented on the model card: install the xcodec2 PyPI package and call XCodec2Model.from_pretrained(model_path).
+
+Problem statement
+After recent changes (including resetting PyTorch’s global default device after LLM load to work around an Accelerate / low_cpu_mem_usage meta-device leak), codec loading still fails. All three fallback strategies in load_codec() can fail in sequence; the worker never obtains a usable codec on the target CUDA device.
+
+Observed failure modes (from production logs)
+Manual weight path (_load_codec_manual_weights)
+
+Imports XCodec2Model from modeling_xcodec2.py in the codec directory.
+Then calls AutoConfig.from_pretrained(codec_dir, trust_remote_code=True).
+Error: The checkpoint has model type xcodec2 but Transformers does not recognize this architecture.
+Interpretation: Config resolution fails before weights are loaded manually. The stack never reaches load_state_dict with safetensors/bin files.
+PyPI xcodec2 package path (_try_xcodec2_pkg)
+
+Calls XCodec2Model.from_pretrained(codec_path, token=...).
+Error: 'NoneType' object has no attribute 'device' (when the caller applies .to(device) or during internal module moves).
+Interpretation: Either from_pretrained returns an invalid object, or the constructed model has a None submodule/buffer that code assumes is a tensor with a .device attribute—likely a version or checkpoint/package mismatch.
+AutoModel CPU fallback (_try_automodel_cpu)
+
+AutoModel.from_pretrained(..., trust_remote_code=True, device_map={"": "cpu"}, ...).
+Error: Same does not recognize architecture xcodec2 as in (1).
+Interpretation: AutoModel has no built-in mapping for model_type: xcodec2; remote-code registration from the local tree is insufficient under current Transformers + snapshot layout.
+Root cause (summary)
+The implementation assumes that at least one of: (A) local directory + AutoConfig + manual weights, (B) xcodec2 package + from_pretrained, or (C) AutoModel, will always produce a valid XCodec2Model on GPU. In practice:
+
+Transformers does not reliably resolve xcodec2 from a local Hub snapshot via AutoConfig / AutoModel with the current config.json + trust_remote_code behavior and library versions.
+The xcodec2 package path does not yield a model that survives .to(cuda) in the observed environment (invalid or partially initialized module graph).
+The meta-device issue after LLM load appears mitigated (explicit torch.set_default_device(None) / reset before codec load); remaining failures are architecture registration / config loading / model construction, not only meta.
+
+Goals (acceptance criteria)
+After POST /load-model, logs must show successful codec initialization (e.g. explicit “xcodec2 loaded via …” with device=cuda).
+codec_loaded=True during POST /generate for causal YuE runs when YUE_CODEC_PATH points to a complete HKUSTAudio/xcodec2 snapshot.
+Generated output must be non-silent when the LLM emits valid audio tokens (subject to separate YuE/token-budget constraints).
+Behavior must be documented for operators: required Python package versions (Transformers, Accelerate, PyTorch, xcodec2), and whether YUE_CODEC_PATH must be a Hub id, a full local snapshot, or both supported.
+Non-goals
+Changing YuE LLM loading logic beyond what is required for a stable codec load.
+Redesigning the entire inference stack unless necessary; native YUE_REPO_PATH + upstream infer.py remains a valid alternative path already referenced in worker logs.
+Suggested investigation directions (for implementers)
+Reproduce minimal scripts on the target server: AutoConfig.from_pretrained(local_dir, trust_remote_code=True) only; then XCodec2Model.from_pretrained(local_dir) only; compare with HKUSTAudio/xcodec2 as a Hub id string vs local path.
+Align Transformers / Accelerate / torch / xcodec2 with the versions recommended on the HKUSTAudio/xcodec2 model card.
+Verify the local directory contains all files Hub expects for custom code (config.json auto_map, modeling modules, etc.).
+If Hugging Face–based loading remains fragile, prefer explicit class import + documented from_pretrained contract from the xcodec2 package only, or document native YuE as the supported production path.

@@ -164,12 +164,19 @@ artifacts/gpu-worker/
 - `/generate` auto-loads the default model if none is loaded.
 - Worker state resets on restart (model must be reloaded).
 
-### Integration points (stub → real model)
+### XCodec2 codec loading
 
-- **Inference**: `app/routes/generate.py` → `_run_inference()` — replace `_write_silent_wav` with real model call.
-- **Model loading**: `app/state.py` → `WorkerState.load_model()` — replace stub with `MusicGen.get_pretrained()` or equivalent.
-- **Model unloading**: `app/state.py` → `WorkerState.unload_model()` — replace stub with `del model; torch.cuda.empty_cache()`.
-- **GPU telemetry**: Replace simulated values with real `nvidia-smi` / `torch.cuda` queries.
+`app/yue_adapter.py` → `load_codec()` loads the xcodec2 neural codec from `YUE_CODEC_PATH`.
+
+Three strategies are tried in order:
+1. **Local directory + direct `model_cls.from_pretrained()`** (primary): Imports `XCodec2Model` from `modeling_xcodec2.py` in the local directory, then calls `from_pretrained()` on that class directly. This bypasses `AutoConfig` entirely, avoiding the *"does not recognize architecture xcodec2"* error. If `from_pretrained` still fails, falls back to manual JSON config + safetensors/bin weight loading.
+2. **`xcodec2` pip package**: Calls `XCodec2Model.from_pretrained()` from the installed package, with a meta-device reset first to prevent accelerate's `NoneType` device error.
+3. **AutoModel CPU fallback**: `AutoModel.from_pretrained(..., device_map={"": "cpu"})`.
+
+**Operator requirements:**
+- `YUE_CODEC_PATH` must point to a full local snapshot of `HKUSTAudio/xcodec2` (not `m-a-p/xcodec2`) — must contain `modeling_xcodec2.py` + weight files.
+- Alternatively, `pip install xcodec2` and set `YUE_CODEC_PATH=HKUSTAudio/xcodec2`.
+- Compatible versions: PyTorch ≥ 2.3, Transformers ≥ 4.44, Accelerate ≥ 0.33.
 
 ### Key env vars
 
@@ -177,9 +184,12 @@ artifacts/gpu-worker/
 |---|---|---|
 | `PORT` | `9000` | Port the worker listens on |
 | `WORKER_TOKEN` | _(blank)_ | Bearer token; blank = auth disabled |
-| `DEFAULT_MODEL_NAME` | `musicgen-medium` | Model loaded when none is specified |
+| `DEFAULT_MODEL_NAME` | `yue-base` | Model name used by /load-model |
 | `OUTPUT_DIR` | `output` | Directory for generated WAV files |
-| `SIMULATED_VRAM_TOTAL_GB` | `24.0` | Fake VRAM total for /health telemetry |
+| `YUE_MODEL_PATH` | _(blank)_ | Local path to YuE-s1-7B checkpoint |
+| `YUE_CODEC_PATH` | `HKUSTAudio/xcodec2` | Local path or HF repo id for xcodec2 |
+| `YUE_DEVICE` | `cuda` | Compute device (`cuda` or `cpu`) |
+| `YUE_DTYPE` | `fp16` | Precision (`fp16`, `bf16`, `fp32`) |
 
 ### Workflow
 

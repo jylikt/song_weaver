@@ -86,10 +86,10 @@ class Settings(BaseSettings):
     # XCodec2 codec — decodes audio codec tokens produced by the YuE LLM.
     # Priority: local path > HF repo id.
     # Examples:
-    #   /root/xcodec2          (pre-downloaded local directory)
-    #   m-a-p/xcodec2          (HuggingFace repo, requires internet + optional HF_TOKEN)
+    #   /root/xcodec2          (pre-downloaded local directory — recommended)
+    #   HKUSTAudio/xcodec2     (HuggingFace repo, requires internet + optional HF_TOKEN)
     # Leave empty to skip codec loading (generations fall back to silent WAV).
-    yue_codec_path: str = "m-a-p/xcodec2"
+    yue_codec_path: str = "HKUSTAudio/xcodec2"
 
     # HuggingFace token for gated/private model repos (codec or LLM).
     # Set via HF_TOKEN env var or here. Leave blank for public repos.

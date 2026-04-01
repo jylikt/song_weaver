@@ -177,15 +177,19 @@ def load_codec(
 
     Loading strategy (tried in order until one succeeds):
 
-      1. Direct module import from the local codec directory.
-         AutoModel.from_pretrained() with trust_remote_code=True triggers a
-         meta-device initialization path for the xcodec2 model type, producing
-         the error "from_pretrained with a meta device context manager".
-         Importing the model class directly from the directory avoids AutoModel
-         entirely and sidesteps the meta-device issue.
+      1. Direct module import + model_cls.from_pretrained() (primary path).
+         Imports XCodec2Model from modeling_xcodec2.py inside the local codec
+         directory, then calls XCodec2Model.from_pretrained(codec_dir) on that
+         class directly.  Because the class carries its own config_class, this
+         completely bypasses AutoConfig and avoids the "does not recognize
+         architecture xcodec2" error that occurs when AutoConfig is used.
+         Falls back to manual JSON config + safetensors/bin weight loading if
+         from_pretrained itself raises an exception.
 
       2. xcodec2 pip package (pip install xcodec2).
-         If installed, XCodec2Model.from_pretrained() is called directly.
+         If installed, calls XCodec2Model.from_pretrained() from the package.
+         A meta-device reset is applied before the call to prevent accelerate's
+         init_empty_weights leak from causing NoneType device attribute errors.
 
       3. AutoModel fallback with explicit CPU device_map.
          Passing device_map={"": "cpu"} and torch_dtype=float32 prevents the
@@ -250,9 +254,11 @@ def load_codec(
         "Failed to load xcodec2 codec from '%s': %s\n"
         "Generations will fall back to silent WAV.\n"
         "Fix options:\n"
-        "  • Ensure /root/xcodec2 contains modeling_xcodec2.py + weight files.\n"
+        "  • Download the full HKUSTAudio/xcodec2 snapshot and set YUE_CODEC_PATH to\n"
+        "    that local directory (must contain modeling_xcodec2.py + weight files).\n"
         "  • Run: pip install xcodec2  (official package, recommended).\n"
-        "  • Set YUE_REPO_PATH to a cloned HKUSTAudio/YuE repo for native inference.",
+        "  • Set YUE_REPO_PATH to a cloned HKUSTAudio/YuE repo for native inference.\n"
+        "  • Note: use HKUSTAudio/xcodec2 (not m-a-p/xcodec2) as the HF repo id.",
         codec_path, last_exc,
     )
     return None
@@ -280,15 +286,17 @@ def _reset_default_device() -> None:
 
 def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
     """
-    Load xcodec2 without calling from_pretrained.
+    Load xcodec2 from a local directory without going through AutoConfig.
 
     Steps:
       1. sys.path injection — import model class from modeling_xcodec2.py.
-      2. Load config via AutoConfig.from_pretrained (reads JSON only, safe).
-      3. Instantiate model_cls(config) on CPU — no meta device involved.
-      4. Load weights from .safetensors or pytorch_model.bin manually.
-      5. load_state_dict + move to target device.
+      2. Call model_cls.from_pretrained(codec_dir) directly — the class knows
+         its own config_class, so AutoConfig is never consulted and the
+         "does not recognize architecture xcodec2" error is avoided entirely.
+      3. If from_pretrained fails, fall back to manual JSON config parsing +
+         safetensors/bin weight loading (keeps device off meta throughout).
     """
+    import json
     import sys
     import torch
     from pathlib import Path as _Path
@@ -301,7 +309,7 @@ def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
         sys.path.insert(0, codec_dir)
 
     try:
-        # Step 1 — find model class
+        # Step 1 — import model class from local directory
         model_cls = None
         for module_name, class_names in [
             ("modeling_xcodec2", ["XCodec2Model"]),
@@ -324,11 +332,52 @@ def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
                 f"Expected modeling_xcodec2.py with XCodec2Model."
             )
 
-        # Step 2 — load config (JSON-only, no weights, no meta device)
-        from transformers import AutoConfig
-        config = AutoConfig.from_pretrained(codec_dir, trust_remote_code=True)
+        # Step 2 — use the locally-imported class's own from_pretrained.
+        # This bypasses AutoConfig entirely: the class carries a config_class
+        # attribute pointing to its own config (e.g. XCodec2Config), so
+        # Transformers never needs to look up "xcodec2" in its global registry.
+        # Reset meta-device state first to neutralise any accelerate leak.
+        _reset_default_device()
+        try:
+            codec = model_cls.from_pretrained(
+                codec_dir,
+                local_files_only=True,
+                torch_dtype=torch.float32,
+            )
+            codec = codec.to(device).eval()
+            return codec
+        except Exception as fp_exc:
+            logger.debug(
+                "model_cls.from_pretrained failed: %s — falling back to manual weight load.",
+                fp_exc,
+            )
 
-        # Step 3 — instantiate on CPU
+        # Step 3 — manual config + weight loading (last resort).
+        # Derive config class name from model class name (XCodec2Model → XCodec2Config).
+        mod_obj = sys.modules.get(model_cls.__module__)
+        config_cls_name = model_cls.__name__.replace("Model", "Config")
+        config_cls = getattr(mod_obj, config_cls_name, None) if mod_obj else None
+
+        config_json = codec_dir_path / "config.json"
+        if not config_json.exists():
+            raise FileNotFoundError(f"No config.json found in {codec_dir}")
+
+        with open(config_json, encoding="utf-8") as f:
+            cfg_dict = json.load(f)
+
+        if config_cls is not None:
+            # Strip Transformers bookkeeping keys that aren't __init__ params.
+            skip = {"model_type", "transformers_version", "_name_or_path",
+                    "architectures", "auto_map", "torch_dtype"}
+            try:
+                config = config_cls(**{k: v for k, v in cfg_dict.items() if k not in skip})
+            except Exception:
+                from transformers import PretrainedConfig
+                config = PretrainedConfig.from_pretrained(codec_dir)
+        else:
+            from transformers import PretrainedConfig
+            config = PretrainedConfig.from_pretrained(codec_dir)
+
         with torch.device("cpu"):
             model = model_cls(config)
 
@@ -372,8 +421,7 @@ def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
         if unexpected:
             logger.debug("Unexpected keys in codec state_dict: %s", unexpected[:5])
 
-        model = model.to(device).eval()
-        return model
+        return model.to(device).eval()
 
     finally:
         if inserted and codec_dir in sys.path:
@@ -381,6 +429,9 @@ def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
 
 
 def _try_xcodec2_pkg(codec_path: str, token: Optional[str]) -> Any:
+    # Reset meta-device state before calling from_pretrained to avoid
+    # accelerate's init_empty_weights leak causing NoneType device errors.
+    _reset_default_device()
     from xcodec2.modeling_xcodec2 import XCodec2Model  # type: ignore[import]
     return XCodec2Model.from_pretrained(codec_path, token=token)
 
