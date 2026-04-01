@@ -90,7 +90,7 @@ class WorkerState:
         # Populated by load_model(); consumed by _run_inference() in generate.py
         self._model: Optional[Any] = None
         self._processor: Optional[Any] = None
-        self._codec: Optional[Any] = None          # xcodec2 codec model
+        self._codec: Optional[Any] = None          # audio codec (xcodec_mini_infer)
         self._codec_n_codebooks: Optional[int] = None  # detected from codec; overrides config
         self._device: Optional[Any] = None         # torch.device
         self._torch_dtype: Optional[Any] = None    # torch dtype
@@ -222,7 +222,7 @@ class WorkerState:
             self._torch_dtype = torch_dtype
             self._model_family = family
 
-            # ── Load xcodec2 codec (needed for causal/YuE audio decoding) ─────
+            # ── Load audio codec (xcodec_mini_infer, needed for YuE decoding) ──
             # load_codec() returns None on failure and logs a clear error — the
             # worker stays functional in stub-style degraded mode.
             if family == "causal" and settings.yue_codec_path:
@@ -235,10 +235,10 @@ class WorkerState:
                 self._codec = None
 
             # ── Detect actual codec quantizer count ──────────────────────────
-            # The xcodec2 model's ResidualFSQ may have a different number of
-            # quantizer stages than yue_codec_n_codebooks. Read it directly from
-            # codec.generator.quantizer.codebooks.shape[0] so that both the
-            # token budget and the decode reshape use the correct value.
+            # The codec's RVQ/FSQ may have a different number of quantizer
+            # stages than yue_codec_n_codebooks. Read it from the model's
+            # internal quantizer structure so that both the token budget and
+            # the decode reshape use the correct value.
             self._codec_n_codebooks = None
             if self._codec is not None:
                 from app.yue_adapter import detect_codec_n_quantizers

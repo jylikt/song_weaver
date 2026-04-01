@@ -10,7 +10,7 @@ Two inference paths are supported, selected by YUE_REPO_PATH:
     all token-budget, prompt-format, and codec concerns are handled correctly.
 
   Path B — Built-in transformers (fallback, YUE_REPO_PATH not set)
-    Loads the LLM with AutoModelForCausalLM and xcodec2 separately.
+    Loads the LLM with AutoModelForCausalLM and the audio codec separately.
     Critical correctness notes for this path:
       • text_vocab_size MUST be the BASE Llama-2 vocab (32 000), NOT
         tokenizer.vocab_size which returns the full extended vocab (83 734).
@@ -26,8 +26,10 @@ the config class to 'causal' or 'seq2seq'.
 
 Codec loading
 -------------
-load_codec() loads the xcodec2 neural audio codec from a local path or
-HuggingFace repo id (m-a-p/xcodec2).  Pass yue_hf_token for gated repos.
+load_codec() loads the xcodec_mini_infer neural audio codec from a local
+path or HuggingFace repo id (m-a-p/xcodec_mini_infer).  This is the codec
+that YuE was designed for — it has 8 RVQ codebooks and a 24 kHz sample rate.
+Pass yue_hf_token for gated repos.
 """
 
 from __future__ import annotations
@@ -173,40 +175,40 @@ def load_codec(
     hf_token: str = "",
 ) -> Optional[Any]:
     """
-    Load the xcodec2 audio codec used to decode YuE audio tokens to waveforms.
+    Load the xcodec_mini_infer audio codec used to decode YuE audio tokens to waveforms.
+
+    This is the codec YuE was trained with (m-a-p/xcodec_mini_infer).
+    It has 8 RVQ codebooks, a 24 kHz sample rate, and requires trust_remote_code=True.
 
     Loading strategy (tried in order until one succeeds):
 
-      1. Direct module import + model_cls.from_pretrained() (primary path).
-         Imports XCodec2Model from modeling_xcodec2.py inside the local codec
-         directory, then calls XCodec2Model.from_pretrained(codec_dir) on that
-         class directly.  Because the class carries its own config_class, this
-         completely bypasses AutoConfig and avoids the "does not recognize
-         architecture xcodec2" error that occurs when AutoConfig is used.
-         Falls back to manual JSON config + safetensors/bin weight loading if
-         from_pretrained itself raises an exception.
+      1. Direct module import + model_cls.from_pretrained() (primary path for
+         local directories).  Scans the codec directory for known model module
+         files (model.py, modeling_xcodec.py, modeling_xcodec2.py) and known
+         class names (XCodecModel, XCodec2Model, CodecModel, SoundCodec).
+         Completely bypasses AutoConfig, avoiding "does not recognize
+         architecture" errors.  Falls back to manual JSON config + weight
+         loading if from_pretrained itself raises an exception.
 
-      2. xcodec2 pip package (pip install xcodec2).
-         If installed, calls XCodec2Model.from_pretrained() from the package.
-         A meta-device reset is applied before the call to prevent accelerate's
-         init_empty_weights leak from causing NoneType device attribute errors.
-
-      3. AutoModel fallback with explicit CPU device_map.
-         Passing device_map={"": "cpu"} and torch_dtype=float32 prevents the
-         meta-device path that AutoModel normally uses for custom model types.
+      2. AutoModel with trust_remote_code + explicit CPU device_map (primary
+         path for HF repo ids such as 'm-a-p/xcodec_mini_infer').
+         Passing device_map={"": "cpu"} prevents the meta-device path.
          The codec is moved to the target device after loading.
+
+      3. xcodec2 pip package (legacy; pip install xcodec2).
+         Kept for compatibility with old local xcodec2 checkpoints.
 
     Returns None on failure — caller logs the error and continues in degraded mode.
     """
     if not codec_path:
         logger.warning(
             "YUE_CODEC_PATH is empty — codec loading skipped. "
-            "Set YUE_CODEC_PATH to a local xcodec2 directory or 'm-a-p/xcodec2' "
-            "to enable real audio output."
+            "Set YUE_CODEC_PATH to a local xcodec_mini_infer directory or "
+            "'m-a-p/xcodec_mini_infer' to enable real audio output."
         )
         return None
 
-    logger.info("Loading xcodec2 codec | path=%s | device=%s", codec_path, device)
+    logger.info("Loading audio codec | path=%s | device=%s", codec_path, device)
     token = hf_token or None
 
     # ── Reset meta-device global state ────────────────────────────────────────
@@ -220,45 +222,53 @@ def load_codec(
 
     last_exc: Optional[Exception] = None
 
-    # ── Strategy 1: manual weight loading — never calls from_pretrained ───────
-    # This is the primary strategy for local codec directories.  It loads the
-    # model class from modeling_xcodec2.py, instantiates it from config, then
-    # loads weights directly from .safetensors / .bin files.  Because
-    # from_pretrained is never called, the meta-device global state is irrelevant.
+    # ── Strategy 1: manual weight loading for local directories ───────────────
+    # Scans the codec dir for known module files (model.py, modeling_xcodec.py,
+    # modeling_xcodec2.py) and extracts the model class, then loads weights
+    # directly.  Never calls AutoConfig, so architecture-not-found errors are
+    # fully avoided.  Preferred for local checkpoints of any xcodec variant.
     if os.path.isdir(codec_path):
         try:
             codec = _load_codec_manual_weights(codec_path, device)
-            logger.info("xcodec2 loaded via manual weights | device=%s", device)
+            logger.info("Audio codec loaded via manual weights | device=%s", device)
             return codec
         except Exception as exc:
             logger.debug("Manual weight load failed: %s — trying next strategy.", exc)
             last_exc = exc
 
-    # ── Strategy 2: from_pretrained after device reset ────────────────────────
-    # The meta-device reset above makes from_pretrained safe to call again.
-    # Try the xcodec2 pip package first (cleanest), then AutoModel fallback.
-    for attempt_label, loader in [
-        ("xcodec2-pkg",   lambda: _try_xcodec2_pkg(codec_path, token)),
-        ("AutoModel-cpu", lambda: _try_automodel_cpu(codec_path, token)),
-    ]:
-        try:
-            codec = loader()
-            codec = codec.to(device).eval()
-            logger.info("xcodec2 loaded via %s | device=%s", attempt_label, device)
-            return codec
-        except Exception as exc:
-            logger.debug("%s load failed: %s — trying next strategy.", attempt_label, exc)
-            last_exc = exc
+    # ── Strategy 2: AutoModel with trust_remote_code (primary for HF repos) ──
+    # m-a-p/xcodec_mini_infer ships custom model code in the HF repo and
+    # requires trust_remote_code=True.  Explicit CPU device_map prevents the
+    # meta-device path; we move to the target device after loading.
+    try:
+        codec = _try_automodel_cpu(codec_path, token)
+        codec = codec.to(device).eval()
+        logger.info("Audio codec loaded via AutoModel | device=%s", device)
+        return codec
+    except Exception as exc:
+        logger.debug("AutoModel load failed: %s — trying next strategy.", exc)
+        last_exc = exc
+
+    # ── Strategy 3: xcodec2 pip package (legacy fallback) ─────────────────────
+    # Kept for compatibility with old HKUSTAudio/xcodec2 local checkpoints that
+    # were installed via `pip install xcodec2`.
+    try:
+        codec = _try_xcodec2_pkg(codec_path, token)
+        codec = codec.to(device).eval()
+        logger.info("Audio codec loaded via xcodec2 package | device=%s", device)
+        return codec
+    except Exception as exc:
+        logger.debug("xcodec2-pkg load failed: %s", exc)
+        last_exc = exc
 
     logger.error(
-        "Failed to load xcodec2 codec from '%s': %s\n"
+        "Failed to load audio codec from '%s': %s\n"
         "Generations will fall back to silent WAV.\n"
         "Fix options:\n"
-        "  • Download the full HKUSTAudio/xcodec2 snapshot and set YUE_CODEC_PATH to\n"
-        "    that local directory (must contain modeling_xcodec2.py + weight files).\n"
-        "  • Run: pip install xcodec2  (official package, recommended).\n"
-        "  • Set YUE_REPO_PATH to a cloned HKUSTAudio/YuE repo for native inference.\n"
-        "  • Note: use HKUSTAudio/xcodec2 (not m-a-p/xcodec2) as the HF repo id.",
+        "  • Set YUE_CODEC_PATH='m-a-p/xcodec_mini_infer' (recommended HF repo).\n"
+        "  • Download the m-a-p/xcodec_mini_infer snapshot and set YUE_CODEC_PATH\n"
+        "    to that local directory (must contain model.py + weight files).\n"
+        "  • Set YUE_REPO_PATH to a cloned HKUSTAudio/YuE repo for native inference.",
         codec_path, last_exc,
     )
     return None
@@ -268,45 +278,71 @@ def load_codec(
 
 def detect_codec_n_quantizers(codec: Any) -> Optional[int]:
     """
-    Inspect a loaded xcodec2 codec and return the actual number of RVQ/FSQ
-    quantizer stages it uses.
+    Inspect a loaded xcodec-family codec and return the actual number of
+    RVQ/FSQ/VQ quantizer stages it uses.
 
-    xcodec2 from HKUSTAudio exposes:
-        codec.generator.quantizer          — ResidualFSQ instance
-        codec.generator.quantizer.codebooks — shape (n_q, codebook_size, dim)
-        codec.generator.quantizer.fsqs      — list of FSQ stages, len == n_q
+    Structural paths searched (in priority order):
 
-    Returns None when the structure cannot be determined so callers can fall
+      xcodec_mini_infer (m-a-p) — RVQ layout:
+        codec.quantizer.quantizers           — list of VQ stages, len == n_q
+        codec.quantizer.codebooks            — shape (n_q, codebook_size, dim)
+        codec.model.quantizer.quantizers/codebooks
+        codec.vq_model.quantizer.*
+
+      xcodec2 (HKUSTAudio) — ResidualFSQ layout:
+        codec.generator.quantizer.codebooks  — shape (n_q, codebook_size, dim)
+        codec.generator.quantizer.fsqs       — list of FSQ stages, len == n_q
+
+    Returns None when the structure cannot be determined so callers fall
     back gracefully to the configured yue_codec_n_codebooks value.
     """
+    def _n_from_quantizer(q_obj: Any) -> Optional[int]:
+        """Extract n_quantizers from any quantizer-like object."""
+        if q_obj is None:
+            return None
+        # Codebooks tensor: shape (n_q, codebook_size, dim) — most reliable
+        codebooks = getattr(q_obj, "codebooks", None)
+        if codebooks is not None:
+            try:
+                return int(codebooks.shape[0])
+            except Exception:
+                pass
+        # List of quantizer stages: quantizers / fsqs / layers
+        for list_attr in ("quantizers", "fsqs", "layers", "rvq_layers"):
+            stages = getattr(q_obj, list_attr, None)
+            if stages is not None and hasattr(stages, "__len__"):
+                return len(stages)
+        # num_quantizers scalar attribute
+        for scalar_attr in ("num_quantizers", "n_q", "num_q", "n_codebooks"):
+            val = getattr(q_obj, scalar_attr, None)
+            if val is not None:
+                try:
+                    return int(val)
+                except Exception:
+                    pass
+        return None
+
     try:
-        # Primary path: codec.generator.quantizer (xcodec2 HKUSTAudio layout)
+        # ── xcodec_mini_infer paths (m-a-p) ───────────────────────────────────
+        # Direct quantizer on the model root (most common for xcodec_mini)
+        for root_attr in (None, "model", "vq_model", "codec"):
+            root = codec if root_attr is None else getattr(codec, root_attr, None)
+            if root is None:
+                continue
+            for q_attr in ("quantizer", "vq", "residual_vq", "residual_fsq"):
+                q_obj = getattr(root, q_attr, None)
+                n = _n_from_quantizer(q_obj)
+                if n is not None:
+                    return n
+
+        # ── xcodec2 paths (HKUSTAudio) ────────────────────────────────────────
         generator = getattr(codec, "generator", None)
         if generator is not None:
-            quantizer = getattr(generator, "quantizer", None)
-            if quantizer is not None:
-                # Prefer codebooks tensor shape — ground truth
-                codebooks = getattr(quantizer, "codebooks", None)
-                if codebooks is not None:
-                    return int(codebooks.shape[0])
-                # Fall back to counting FSQ layers
-                for sub_attr in ("fsqs", "quantizers", "layers"):
-                    layers = getattr(quantizer, sub_attr, None)
-                    if layers is not None and hasattr(layers, "__len__"):
-                        return len(layers)
-
-        # Generic fallback: search common attribute paths
-        for parent_attr in ("quantizer", "vq", "residual_fsq"):
-            parent = getattr(codec, parent_attr, None)
-            if parent is None:
-                continue
-            codebooks = getattr(parent, "codebooks", None)
-            if codebooks is not None:
-                return int(codebooks.shape[0])
-            for sub_attr in ("fsqs", "quantizers", "layers"):
-                layers = getattr(parent, sub_attr, None)
-                if layers is not None and hasattr(layers, "__len__"):
-                    return len(layers)
+            for q_attr in ("quantizer", "vq", "residual_vq"):
+                q_obj = getattr(generator, q_attr, None)
+                n = _n_from_quantizer(q_obj)
+                if n is not None:
+                    return n
 
     except Exception:
         pass
@@ -334,13 +370,18 @@ def _reset_default_device() -> None:
 
 def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
     """
-    Load xcodec2 from a local directory without going through AutoConfig.
+    Load an xcodec-family codec from a local directory without going through AutoConfig.
+
+    Supports m-a-p/xcodec_mini_infer (primary) and HKUSTAudio/xcodec2 (legacy).
 
     Steps:
-      1. sys.path injection — import model class from modeling_xcodec2.py.
-      2. Call model_cls.from_pretrained(codec_dir) directly — the class knows
-         its own config_class, so AutoConfig is never consulted and the
-         "does not recognize architecture xcodec2" error is avoided entirely.
+      1. sys.path injection — scan the codec directory for known model modules
+         and class names.  Checked in priority order:
+           model.py          → XCodecModel, CodecModel, SoundCodec  (xcodec_mini)
+           modeling_xcodec.py → XCodecModel, XCodec2Model           (generic xcodec)
+           modeling_xcodec2.py → XCodec2Model                       (xcodec2 legacy)
+      2. Call model_cls.from_pretrained(codec_dir) directly — the class carries
+         its own config_class, so AutoConfig is never consulted.
       3. If from_pretrained fails, fall back to manual JSON config parsing +
          safetensors/bin weight loading (keeps device off meta throughout).
     """
@@ -357,17 +398,32 @@ def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
         sys.path.insert(0, codec_dir)
 
     try:
-        # Step 1 — import model class from local directory
+        # Step 1 — find model class from local directory.
+        # Priority: xcodec_mini_infer (model.py) > generic xcodec > xcodec2 legacy.
+        # Each entry: (module_filename_stem, [candidate_class_names])
         model_cls = None
         for module_name, class_names in [
-            ("modeling_xcodec2", ["XCodec2Model"]),
-            ("modeling_xcodec",  ["XCodec2Model", "XCodecModel"]),
+            ("model",            ["XCodecModel", "CodecModel", "SoundCodec", "XCodec2Model"]),
+            ("modeling_xcodec",  ["XCodecModel", "XCodec2Model"]),
+            ("modeling_xcodec2", ["XCodec2Model", "XCodecModel"]),
+            ("xcodec",           ["XCodecModel", "CodecModel"]),
         ]:
+            # Only attempt if the module file actually exists in the codec dir
+            # (avoids polluting sys.modules with failed imports from other packages)
+            if not (codec_dir_path / f"{module_name}.py").exists():
+                continue
             try:
-                mod = __import__(module_name)
+                # Force reimport from the injected sys.path entry
+                if module_name in sys.modules:
+                    mod = sys.modules[module_name]
+                else:
+                    mod = __import__(module_name)
                 for cls_name in class_names:
                     if hasattr(mod, cls_name):
                         model_cls = getattr(mod, cls_name)
+                        logger.debug(
+                            "Found codec class %s in %s.py", cls_name, module_name
+                        )
                         break
                 if model_cls:
                     break
@@ -376,8 +432,9 @@ def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
 
         if model_cls is None:
             raise ImportError(
-                f"No recognisable xcodec2 model class found in {codec_dir}. "
-                f"Expected modeling_xcodec2.py with XCodec2Model."
+                f"No recognisable codec model class found in {codec_dir}. "
+                f"Expected one of: model.py (XCodecModel/CodecModel/SoundCodec), "
+                f"modeling_xcodec.py (XCodecModel), modeling_xcodec2.py (XCodec2Model)."
             )
 
         # Step 2 — use the locally-imported class's own from_pretrained.
@@ -477,11 +534,29 @@ def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
 
 
 def _try_xcodec2_pkg(codec_path: str, token: Optional[str]) -> Any:
+    """
+    Legacy fallback: load via the xcodec2 pip package.
+    Tries the xcodec2 package first, then a generic xcodec package.
+    """
     # Reset meta-device state before calling from_pretrained to avoid
     # accelerate's init_empty_weights leak causing NoneType device errors.
     _reset_default_device()
-    from xcodec2.modeling_xcodec2 import XCodec2Model  # type: ignore[import]
-    return XCodec2Model.from_pretrained(codec_path, token=token)
+    # Try xcodec2 package (HKUSTAudio/xcodec2 variant)
+    try:
+        from xcodec2.modeling_xcodec2 import XCodec2Model  # type: ignore[import]
+        return XCodec2Model.from_pretrained(codec_path, token=token)
+    except ImportError:
+        pass
+    # Try generic xcodec package (m-a-p xcodec variant)
+    try:
+        from xcodec.modeling_xcodec import XCodecModel  # type: ignore[import]
+        return XCodecModel.from_pretrained(codec_path, token=token)
+    except ImportError:
+        pass
+    raise ImportError(
+        "Neither 'xcodec2' nor 'xcodec' package is installed. "
+        "Install one or use YUE_CODEC_PATH='m-a-p/xcodec_mini_infer' instead."
+    )
 
 
 def _try_automodel_cpu(codec_path: str, token: Optional[str]) -> Any:
@@ -695,7 +770,7 @@ def _build_infer_cmd(
     return cmd
 
 
-# ─── Path B: Causal (Llama + xcodec2) inference ──────────────────────────────
+# ─── Path B: Causal (Llama + xcodec_mini_infer) inference ────────────────────
 
 def _run_causal_inference(
     body: "GenerateRequest",
@@ -815,12 +890,12 @@ def _run_causal_inference(
     # ── Codec decode ──────────────────────────────────────────────────────────
     if codec is None:
         raise RuntimeError(
-            f"xcodec2 codec not loaded ({n_audio} audio tokens extracted but cannot decode).\n"
-            f"Fix: set YUE_CODEC_PATH to a local xcodec2 directory, "
+            f"Audio codec not loaded ({n_audio} audio tokens extracted but cannot decode).\n"
+            f"Fix: set YUE_CODEC_PATH='m-a-p/xcodec_mini_infer' or a local snapshot, "
             f"or set YUE_REPO_PATH to the HKUSTAudio/YuE repo for native inference."
         )
 
-    waveform = _decode_with_xcodec2(audio_codes_flat, codec, n_codebooks, device)
+    waveform = _decode_with_codec(audio_codes_flat, codec, n_codebooks, device)
     _save_waveform(waveform, output_path, sample_rate)
     logger.info(
         "Causal inference complete | job=%s | audio_tokens=%d | waveform=%s",
@@ -828,17 +903,26 @@ def _run_causal_inference(
     )
 
 
-def _decode_with_xcodec2(
+def _decode_with_codec(
     audio_codes_flat: Any,
     codec: Any,
     n_codebooks: int,
     device: Any,
 ) -> Any:
     """
-    Decode a flat sequence of codec indices to a waveform tensor.
+    Decode a flat sequence of codec token indices to a waveform tensor.
 
-    YuE interleaves codebooks: [t0_cb0, t0_cb1…t0_cb7, t1_cb0, t1_cb1…]
-    Reshape to (1, n_codebooks, seq_len) before passing to the codec.
+    YuE interleaves codebooks in the token stream:
+        [t0_cb0, t0_cb1 … t0_cb{N-1}, t1_cb0, t1_cb1 …]
+
+    This function reshapes the flat sequence to (1, n_codebooks, seq_len)
+    and then calls the codec's decode API.
+
+    Supported codec APIs (tried in order):
+      • codec.decode_code(codes)                  — xcodec_mini_infer and xcodec2
+      • codec.decode_code(codes[0])               — unbatched variant (n_q, T)
+      • codec.decode(codes)                       — generic decode
+      • codec.quantizer.decode + codec.decoder    — manual two-step decode
     """
     import torch
 
@@ -868,18 +952,33 @@ def _decode_with_xcodec2(
     )
 
     with torch.no_grad():
+        # Primary path: decode_code(codes) — used by both xcodec_mini_infer and xcodec2
         if hasattr(codec, "decode_code"):
-            return codec.decode_code(codes)
+            try:
+                return codec.decode_code(codes)
+            except (TypeError, RuntimeError, ValueError) as e:
+                # Some xcodec variants expect (n_q, T) without batch dim
+                logger.debug(
+                    "decode_code(codes) failed (%s) — retrying without batch dim.", e
+                )
+                try:
+                    return codec.decode_code(codes[0])
+                except Exception:
+                    raise
+
+        # Generic decode(codes) fallback
         if hasattr(codec, "decode"):
             out = codec.decode(codes)
             return out[0] if isinstance(out, (tuple, list)) else out
+
+        # Two-step manual decode for models without a combined decode_code
         if hasattr(codec, "quantizer") and hasattr(codec, "decoder"):
             embeddings = codec.quantizer.decode(codes)
             return codec.decoder(embeddings)
 
     raise RuntimeError(
-        "xcodec2 codec does not expose decode_code / decode / quantizer+decoder. "
-        "Check that YUE_CODEC_PATH points to a real xcodec2 model."
+        "Audio codec does not expose decode_code / decode / quantizer+decoder. "
+        "Check that YUE_CODEC_PATH points to a valid xcodec_mini_infer or xcodec2 model."
     )
 
 

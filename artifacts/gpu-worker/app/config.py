@@ -83,19 +83,23 @@ class Settings(BaseSettings):
     generation_timeout_sec: int = 240
 
     # ── Codec configuration ───────────────────────────────────────────────────
-    # XCodec2 codec — decodes audio codec tokens produced by the YuE LLM.
+    # xcodec_mini_infer — the audio codec YuE was designed for.
+    # It has 8 RVQ codebooks, a 24 kHz sample rate, and is publicly available.
     # Priority: local path > HF repo id.
     # Examples:
-    #   /root/xcodec2          (pre-downloaded local directory — recommended)
-    #   HKUSTAudio/xcodec2     (HuggingFace repo, requires internet + optional HF_TOKEN)
+    #   /root/xcodec_mini_infer   (pre-downloaded local snapshot — fastest)
+    #   m-a-p/xcodec_mini_infer   (HuggingFace repo, requires internet)
     # Leave empty to skip codec loading (generations fall back to silent WAV).
-    yue_codec_path: str = "HKUSTAudio/xcodec2"
+    yue_codec_path: str = "m-a-p/xcodec_mini_infer"
 
     # HuggingFace token for gated/private model repos (codec or LLM).
     # Set via HF_TOKEN env var or here. Leave blank for public repos.
     yue_hf_token: str = ""
 
-    # Number of RVQ codebooks in the codec (8 for standard xcodec2).
+    # Number of RVQ codebooks in the codec.
+    # xcodec_mini_infer uses 8 codebooks (same as the original xcodec2 config).
+    # The worker auto-detects this from the loaded model and overrides this value
+    # when the detected count differs — so this is only the fallback default.
     yue_codec_n_codebooks: int = 8
 
     # ── Audio token extraction ────────────────────────────────────────────────

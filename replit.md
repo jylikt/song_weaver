@@ -164,18 +164,22 @@ artifacts/gpu-worker/
 - `/generate` auto-loads the default model if none is loaded.
 - Worker state resets on restart (model must be reloaded).
 
-### XCodec2 codec loading
+### Audio codec (xcodec_mini_infer)
 
-`app/yue_adapter.py` → `load_codec()` loads the xcodec2 neural codec from `YUE_CODEC_PATH`.
+`app/yue_adapter.py` → `load_codec()` loads the **m-a-p/xcodec_mini_infer** codec from `YUE_CODEC_PATH`.
+This is the codec YuE was trained with — 8 RVQ codebooks, 24 kHz output.
 
-Three strategies are tried in order:
-1. **Local directory + direct `model_cls.from_pretrained()`** (primary): Imports `XCodec2Model` from `modeling_xcodec2.py` in the local directory, then calls `from_pretrained()` on that class directly. This bypasses `AutoConfig` entirely, avoiding the *"does not recognize architecture xcodec2"* error. If `from_pretrained` still fails, falls back to manual JSON config + safetensors/bin weight loading.
-2. **`xcodec2` pip package**: Calls `XCodec2Model.from_pretrained()` from the installed package, with a meta-device reset first to prevent accelerate's `NoneType` device error.
-3. **AutoModel CPU fallback**: `AutoModel.from_pretrained(..., device_map={"": "cpu"})`.
+Loading strategies tried in order:
+1. **Local directory + direct class import** (primary for local snapshots): Scans `model.py`, `modeling_xcodec.py`, `modeling_xcodec2.py` for known class names (`XCodecModel`, `XCodec2Model`, `CodecModel`, `SoundCodec`). Calls `from_pretrained()` directly on the found class, bypassing `AutoConfig`. Falls back to manual JSON config + safetensors/bin weight loading if needed.
+2. **AutoModel with `trust_remote_code=True`** (primary for HF repo ids): Uses `AutoModel.from_pretrained(codec_path, trust_remote_code=True, device_map={"": "cpu"})`. Required for `m-a-p/xcodec_mini_infer` since it ships custom model code.
+3. **Legacy xcodec2/xcodec pip package**: Tries `xcodec2.modeling_xcodec2.XCodec2Model` then `xcodec.modeling_xcodec.XCodecModel`.
+
+**Codec quantizer auto-detection:**  
+After loading, `detect_codec_n_quantizers()` introspects the codec's quantizer structure and stores the actual n_q in `WorkerState._codec_n_codebooks`. This overrides `YUE_CODEC_N_CODEBOOKS` so the token budget and decode reshape are always correct.
 
 **Operator requirements:**
-- `YUE_CODEC_PATH` must point to a full local snapshot of `HKUSTAudio/xcodec2` (not `m-a-p/xcodec2`) — must contain `modeling_xcodec2.py` + weight files.
-- Alternatively, `pip install xcodec2` and set `YUE_CODEC_PATH=HKUSTAudio/xcodec2`.
+- Set `YUE_CODEC_PATH=m-a-p/xcodec_mini_infer` (public HF repo, no token needed).
+- Or download the snapshot locally and set `YUE_CODEC_PATH=/root/xcodec_mini_infer`.
 - Compatible versions: PyTorch ≥ 2.3, Transformers ≥ 4.44, Accelerate ≥ 0.33.
 
 ### Key env vars
@@ -187,7 +191,7 @@ Three strategies are tried in order:
 | `DEFAULT_MODEL_NAME` | `yue-base` | Model name used by /load-model |
 | `OUTPUT_DIR` | `output` | Directory for generated WAV files |
 | `YUE_MODEL_PATH` | _(blank)_ | Local path to YuE-s1-7B checkpoint |
-| `YUE_CODEC_PATH` | `HKUSTAudio/xcodec2` | Local path or HF repo id for xcodec2 |
+| `YUE_CODEC_PATH` | `m-a-p/xcodec_mini_infer` | Local path or HF repo id for the audio codec |
 | `YUE_DEVICE` | `cuda` | Compute device (`cuda` or `cpu`) |
 | `YUE_DTYPE` | `fp16` | Precision (`fp16`, `bf16`, `fp32`) |
 
