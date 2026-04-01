@@ -1,0 +1,38 @@
+# ── Web framework ──────────────────────────────────────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-dotenv==1.0.1
+pydantic==2.10.6
+pydantic-settings==2.7.1
+aiofiles==24.1.0
+
+# ── YuE runtime dependencies ───────────────────────────────────────────────────
+# Install the YuE package from M-A-P.
+# Pinned versions are for CUDA 12.1 + Python 3.11.
+# Adjust torch index URL for your CUDA version:
+#   CUDA 11.8: https://download.pytorch.org/whl/cu118
+#   CUDA 12.1: https://download.pytorch.org/whl/cu121
+#   CPU only:  https://download.pytorch.org/whl/cpu
+#
+# On your GPU server, install with:
+#   pip install torch==2.3.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
+torch==2.3.1
+torchaudio==2.3.1
+
+# HuggingFace Transformers — used to load the YuE model and tokenizer
+transformers==4.44.0
+accelerate==0.33.0
+safetensors==0.4.3
+
+# Audio processing
+soundfile==0.12.1
+scipy==1.13.1
+
+# YuE package — install from source until an official pip release is available.
+# On your GPU server, run:
+#   pip install git+https://github.com/multimodal-art-projection/YuE.git
+# Uncomment the line below to include it in requirements.txt:
+# yue @ git+https://github.com/multimodal-art-projection/YuE.git
+
+# Numerical / utilities
+numpy==1.26.4

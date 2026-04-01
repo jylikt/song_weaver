@@ -1,0 +1,162 @@
+Technical Specification: Integrate YuE Model into Song-Weaver MVP
+1. Objective
+Integrate the YuE music generation model into the existing Song-Weaver architecture so that remote_gpu requests produce real generated music (lyrics-based song output) instead of the current silent WAV stub.
+
+2. Current Architecture (Baseline)
+artifacts/song-gen (FastAPI):
+Accepts generation jobs (/api/v1/generate)
+Tracks job lifecycle
+Uses provider mode: local or remote_gpu
+Downloads resulting audio from worker and exposes /api/v1/jobs/{id}/download
+artifacts/gpu-worker (FastAPI):
+Intended remote inference worker
+Exposes /health, /load-model, /generate, /unload-model
+Currently uses stub logic (_write_silent_wav) in generation path
+3. Scope
+In Scope
+Replace GPU worker stub inference with real YuE inference.
+Implement real model lifecycle (load/unload, warm state, health reporting).
+Map API payload (prompt, lyrics, style_preset, duration_sec, seed) to YuE generation parameters.
+Return valid audio file URLs and ensure song-gen can download and serve generated output.
+Add configuration variables and operational controls for GPU deployment.
+Add integration tests/smoke tests for end-to-end flow.
+Out of Scope
+Training/fine-tuning pipeline implementation details (unless explicitly requested).
+Full production hardening (multi-node autoscaling, advanced queueing, billing, etc.).
+Frontend redesign.
+4. Functional Requirements
+FR-1: Real Model Loading
+File: artifacts/gpu-worker/app/state.py
+load_model() must:
+Load YuE model weights/checkpoint into GPU memory.
+Support configurable model name/path from env.
+Be idempotent for repeated same-model requests.
+Support model swap (unload previous model before loading new one).
+unload_model() must:
+Release model object references.
+Clear CUDA memory cache.
+Reset state flags/metadata.
+FR-2: Real Inference Execution
+File: artifacts/gpu-worker/app/routes/generate.py
+_run_inference() must:
+Use loaded YuE model instance from worker state.
+Accept and process input text fields:
+prompt
+lyrics (verse/chorus structure)
+style_preset
+duration_sec
+seed (if provided)
+Generate audio using YuE.
+Save output WAV to OUTPUT_DIR/{job_id}.wav.
+Preserve existing API response schema including audio_url.
+FR-3: API Contract Compatibility
+Keep current worker endpoints and payload contract stable:
+GET /health
+POST /load-model
+POST /generate
+POST /unload-model
+GET /output/{filename}
+song-gen must continue to work with no API contract changes required.
+FR-4: Seed Reproducibility
+When seed is provided, generation should be reproducible (within model limits).
+If seed is absent, random behavior is allowed.
+FR-5: Duration Handling
+Generated output duration should approximate duration_sec.
+Acceptable tolerance must be defined (e.g. +-10%).
+FR-6: Error Handling
+Worker must return meaningful HTTP errors for:
+model not loaded / load failure
+invalid payload
+inference runtime failure
+output write failure
+song-gen should receive actionable error messages through existing flow.
+5. Non-Functional Requirements
+NFR-1: Performance
+Model load latency and generation latency must be logged.
+Generation timeout must be configurable and respected.
+NFR-2: Reliability
+Worker must survive repeated sequential requests without memory leak.
+Unhandled exceptions must return JSON errors (already partially implemented).
+NFR-3: Security
+Support bearer auth via WORKER_TOKEN.
+If token is set, protected routes must require auth.
+Do not expose internal file system paths beyond necessary metadata.
+NFR-4: Observability
+Structured logs for:
+model load/unload events
+generation request start/end
+failure reasons
+GPU memory snapshot (if available)
+6. Configuration Requirements
+Add/validate the following env variables in artifacts/gpu-worker/.env.example:
+
+DEFAULT_MODEL_NAME (or YuE checkpoint alias)
+YUE_MODEL_PATH (local checkpoint path / mount path)
+YUE_DEVICE (cuda / cpu)
+YUE_DTYPE (fp16 / bf16 / fp32)
+YUE_MAX_DURATION_SEC
+YUE_SAMPLE_RATE
+WORKER_TOKEN
+OUTPUT_DIR
+PORT
+In artifacts/song-gen/.env.example ensure:
+
+GENERATOR_PROVIDER=remote_gpu
+REMOTE_WORKER_URL=<remote worker URL>
+REMOTE_WORKER_TOKEN=<token if enabled>
+REMOTE_WORKER_TIMEOUT_SEC=<suitable timeout>
+7. Dependencies
+Update artifacts/gpu-worker/requirements.txt with YuE runtime dependencies:
+
+YuE package or source dependency
+Compatible torch / torchaudio versions for target CUDA
+Any required tokenizer/audio/preprocessing libraries
+Dependency versions must be pinned and validated against target GPU/CUDA driver stack.
+
+8. Deployment Requirements (Remote GPU Server)
+Provision server with NVIDIA GPU and compatible driver/CUDA runtime.
+Install Python 3.11+ and project dependencies.
+Mount/copy YuE weights to server path.
+Configure .env (token, model path, defaults).
+Start worker process (uvicorn/systemd/docker).
+Expose worker endpoint over secure network (HTTPS/reverse proxy recommended).
+Verify connectivity from song-gen host to worker host.
+9. Test Plan (Acceptance)
+API Smoke
+GET /health returns healthy response.
+POST /load-model loads YuE successfully.
+POST /generate returns audio_url for valid lyrics-based request.
+GET /output/{file} returns non-empty WAV.
+POST /unload-model unloads successfully.
+End-to-End
+Submit mode=remote_gpu generation from song-gen.
+Poll job until completed.
+Fetch /api/v1/jobs/{id}/result.
+Download /api/v1/jobs/{id}/download.
+Confirm audio is non-silent and playable.
+Negative Tests
+Invalid token -> unauthorized
+Invalid payload -> validation error
+Missing model path/checkpoint -> model load failure with clear message
+Forced inference exception -> job marked failed with error surfaced
+10. Deliverables
+Updated worker code with YuE integration:
+artifacts/gpu-worker/app/state.py
+artifacts/gpu-worker/app/routes/generate.py
+Updated env templates and requirements.
+Integration notes in README:
+setup steps
+required env vars
+known limits (VRAM, duration, concurrency)
+Test evidence:
+successful API responses
+generated sample track
+end-to-end run proof (logs/video)
+11. Acceptance Criteria (Go/No-Go)
+The integration is accepted when all conditions are true:
+
+remote_gpu jobs produce real YuE-generated audio (not silent stub).
+Existing song-gen API contract remains compatible.
+Generated WAV is downloadable through song-gen result/download endpoints.
+Worker model lifecycle endpoints (load/unload/health) behave correctly.
+Basic smoke + end-to-end tests pass without code edits during test execution.
