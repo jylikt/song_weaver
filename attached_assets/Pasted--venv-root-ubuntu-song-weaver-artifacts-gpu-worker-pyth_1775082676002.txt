@@ -1,0 +1,76 @@
+(.venv) root@ubuntu:~/song_weaver/artifacts/gpu-worker# python main.py
+INFO:     Will watch for changes in these directories: ['/root/song_weaver/artifacts/gpu-worker']
+INFO:     Uvicorn running on http://0.0.0.0:9000 (Press CTRL+C to quit)
+INFO:     Started reloader process [8130] using WatchFiles
+INFO:     Started server process [8132]
+INFO:     Waiting for application startup.
+2026-04-01 22:29:27,182 [INFO] app.main — GPU Worker started | env=production | default_model=yue-base | yue_path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | auth=enabled
+INFO:     Application startup complete.
+INFO:     127.0.0.1:46136 - "GET /health HTTP/1.1" 200 OK
+2026-04-01 22:30:23,497 [INFO] app.state — Loading YuE model | path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | trust_remote_code=False
+2026-04-01 22:30:25,176 [INFO] app.yue_adapter — Detecting model architecture | path=/root/YuE-s1-7B-anneal-en-icl
+2026-04-01 22:30:25,209 [INFO] app.yue_adapter — Detected config class: LlamaConfig
+2026-04-01 22:30:25,209 [INFO] app.yue_adapter — Resolved model family: causal (Llama/decoder-only path)
+2026-04-01 22:30:25,209 [INFO] app.state — Resolved model family: causal
+2026-04-01 22:30:25,948 [INFO] app.yue_adapter — Loading causal LM (AutoModelForCausalLM) | path=/root/YuE-s1-7B-anneal-en-icl
+Loading weights: 100%|███████████████████████████████████████████████████████████████| 291/291 [00:01<00:00, 279.90it/s]
+2026-04-01 22:30:29,194 [INFO] app.yue_adapter — Causal model + tokenizer loaded successfully
+2026-04-01 22:30:29,195 [DEBUG] app.yue_adapter — Reset torch default device to None.
+2026-04-01 22:30:29,195 [INFO] app.yue_adapter — Loading xcodec2 codec | path=/root/xcodec2 | device=cuda
+2026-04-01 22:30:29,195 [DEBUG] app.yue_adapter — Reset torch default device to None.
+2026-04-01 22:30:29,206 [DEBUG] torio._extension.utils — Loading FFmpeg6
+2026-04-01 22:30:29,207 [DEBUG] torio._extension.utils — Failed to load FFmpeg6 extension.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torch/_ops.py", line 1350, in load_library
+    ctypes.CDLL(path)
+  File "/usr/lib/python3.10/ctypes/__init__.py", line 374, in __init__
+    self._handle = _dlopen(self._name, mode)
+OSError: libavutil.so.58: cannot open shared object file: No such file or directory
+2026-04-01 22:30:29,207 [DEBUG] torio._extension.utils — Loading FFmpeg5
+2026-04-01 22:30:29,208 [DEBUG] torio._extension.utils — Failed to load FFmpeg5 extension.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torch/_ops.py", line 1350, in load_library
+    ctypes.CDLL(path)
+  File "/usr/lib/python3.10/ctypes/__init__.py", line 374, in __init__
+    self._handle = _dlopen(self._name, mode)
+OSError: libavutil.so.57: cannot open shared object file: No such file or directory
+2026-04-01 22:30:29,208 [DEBUG] torio._extension.utils — Loading FFmpeg4
+2026-04-01 22:30:29,241 [DEBUG] torio._extension.utils — Successfully loaded FFmpeg4
+2026-04-01 22:30:29,387 [INFO] root — lm_eval is not installed, GPTQ may not be usable
+2026-04-01 22:30:30,316 [DEBUG] datasets — PyTorch version 2.5.0 available.
+2026-04-01 22:30:30,475 [DEBUG] app.yue_adapter — Reset torch default device to None.
+2026-04-01 22:30:30,475 [DEBUG] app.yue_adapter — model_cls.from_pretrained failed: 'NoneType' object has no attribute 'device' — falling back to manual weight load.
+You are using a model of type `xcodec2` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-04-01 22:30:30,477 [DEBUG] app.yue_adapter — Manual weight load failed: 'NoneType' object has no attribute 'device' — trying next strategy.
+2026-04-01 22:30:30,477 [DEBUG] app.yue_adapter — Reset torch default device to None.
+2026-04-01 22:30:30,480 [DEBUG] app.yue_adapter — xcodec2-pkg load failed: 'NoneType' object has no attribute 'device' — trying next strategy.
+2026-04-01 22:30:30,480 [DEBUG] app.yue_adapter — AutoModel-cpu load failed: The checkpoint you are trying to load has model type `xcodec2` but Transformers does not recognize this architecture. This could be because of an issue with the checkpoint, or because your version of Transformers is out of date.
+
+You can update Transformers with the command `pip install --upgrade transformers`. If this does not work, and the checkpoint is very new, then there may not be a release version that supports this model yet. In this case, you can get the most up-to-date code by installing Transformers from source with the command `pip install git+https://github.com/huggingface/transformers.git` — trying next strategy.
+2026-04-01 22:30:30,480 [ERROR] app.yue_adapter — Failed to load xcodec2 codec from '/root/xcodec2': The checkpoint you are trying to load has model type `xcodec2` but Transformers does not recognize this architecture. This could be because of an issue with the checkpoint, or because your version of Transformers is out of date.
+
+You can update Transformers with the command `pip install --upgrade transformers`. If this does not work, and the checkpoint is very new, then there may not be a release version that supports this model yet. In this case, you can get the most up-to-date code by installing Transformers from source with the command `pip install git+https://github.com/huggingface/transformers.git`
+Generations will fall back to silent WAV.
+Fix options:
+  • Download the full HKUSTAudio/xcodec2 snapshot and set YUE_CODEC_PATH to
+    that local directory (must contain modeling_xcodec2.py + weight files).
+  • Run: pip install xcodec2  (official package, recommended).
+  • Set YUE_REPO_PATH to a cloned HKUSTAudio/YuE repo for native inference.
+  • Note: use HKUSTAudio/xcodec2 (not m-a-p/xcodec2) as the HF repo id.
+2026-04-01 22:30:30,480 [INFO] app.state — YuE model ready | model=yue-base | family=causal | device=cuda | dtype=fp16 | load_time=7.0s
+INFO:     127.0.0.1:46136 - "POST /load-model HTTP/1.1" 200 OK
+2026-04-01 22:30:30,489 [INFO] app.routes.generate — Generation start | job=915d7a53-9461-47d0-8b2f-a0e7debc0b58 | model=yue-base | family=causal | stub=False | style=hip_hop | duration=10s | seed=None
+2026-04-01 22:30:30,489 [INFO] app.yue_adapter — Causal inference start | job=915d7a53-9461-47d0-8b2f-a0e7debc0b58 | prompt_chars=609 | duration=10s | codec_loaded=False | text_vocab_size=32000
+2026-04-01 22:30:30,492 [INFO] app.yue_adapter — Token budget | prompt=203 | max_new=6000 | ctx_limit=16384 | ideal=6000

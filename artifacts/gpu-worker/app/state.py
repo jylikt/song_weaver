@@ -91,6 +91,7 @@ class WorkerState:
         self._model: Optional[Any] = None
         self._processor: Optional[Any] = None
         self._codec: Optional[Any] = None          # xcodec2 codec model
+        self._codec_n_codebooks: Optional[int] = None  # detected from codec; overrides config
         self._device: Optional[Any] = None         # torch.device
         self._torch_dtype: Optional[Any] = None    # torch dtype
         self._model_family: Optional[str] = None   # 'causal' | 'seq2seq'
@@ -233,6 +234,32 @@ class WorkerState:
             else:
                 self._codec = None
 
+            # ── Detect actual codec quantizer count ──────────────────────────
+            # The xcodec2 model's ResidualFSQ may have a different number of
+            # quantizer stages than yue_codec_n_codebooks. Read it directly from
+            # codec.generator.quantizer.codebooks.shape[0] so that both the
+            # token budget and the decode reshape use the correct value.
+            self._codec_n_codebooks = None
+            if self._codec is not None:
+                from app.yue_adapter import detect_codec_n_quantizers
+                detected = detect_codec_n_quantizers(self._codec)
+                if detected is not None:
+                    logger.info(
+                        "Codec n_quantizers detected from model: %d "
+                        "(config yue_codec_n_codebooks=%d%s)",
+                        detected,
+                        settings.yue_codec_n_codebooks,
+                        "" if detected == settings.yue_codec_n_codebooks
+                        else " — will use detected value",
+                    )
+                    self._codec_n_codebooks = detected
+                else:
+                    logger.warning(
+                        "Could not auto-detect codec n_quantizers; "
+                        "falling back to yue_codec_n_codebooks=%d.",
+                        settings.yue_codec_n_codebooks,
+                    )
+
             elapsed = time.perf_counter() - t_start
 
             self.model.loaded = True
@@ -274,6 +301,7 @@ class WorkerState:
             if self._codec is not None:
                 del self._codec
                 self._codec = None
+            self._codec_n_codebooks = None
             self._device = None
             self._torch_dtype = None
             self._model_family = None

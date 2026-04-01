@@ -179,6 +179,17 @@ def _run_inference(
 
     from app.yue_adapter import run_yue_inference
 
+    # Use the codec's auto-detected quantizer count when available.
+    # This handles the common mismatch between yue_codec_n_codebooks=8 (config
+    # default) and xcodec2 models that use a single FSQ quantizer (n_q=1).
+    # detect_codec_n_quantizers() reads codec.generator.quantizer.codebooks
+    # shape[0] at load time and stores it in worker_state._codec_n_codebooks.
+    n_codebooks = (
+        worker_state._codec_n_codebooks
+        if worker_state._codec_n_codebooks is not None
+        else settings.yue_codec_n_codebooks
+    )
+
     run_yue_inference(
         body=body,
         output_path=output_path,
@@ -187,7 +198,7 @@ def _run_inference(
         device=worker_state._device,
         family=model_family,
         codec=worker_state._codec,
-        n_codebooks=settings.yue_codec_n_codebooks,
+        n_codebooks=n_codebooks,
         text_vocab_size=settings.yue_text_vocab_size,
         sample_rate=settings.yue_sample_rate,
         cfg_scale=settings.yue_cfg_scale,

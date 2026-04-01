@@ -1,0 +1,251 @@
+Вот такая ошибка во фронтенде 
+Worker returned HTTP 500: {"detail":"Inference failed: Failed to determine the size of all axes in the expression under the given constraints.\nExpression: \"q [c] d, b n q -> q b n d\"\n \nThe expression, tensor shapes and contraints resulted in the following equation(s):\n q [c] d = 1 65536 8\n b n q = 1 703 8\n 1 = 1\nThe operation was called with the following arguments:\n - Positional argument #1: Tensor with shape (1, 65536, 8)\n - Positional argument #2: Tensor with shape (1, 703, 8)\n"}
+
+Вот логи из консоли gpu-worker:
+(.venv) root@ubuntu:~/song_weaver/artifacts/gpu-worker# python main.py
+INFO:     Will watch for changes in these directories: ['/root/song_weaver/artifacts/gpu-worker']
+INFO:     Uvicorn running on http://0.0.0.0:9000 (Press CTRL+C to quit)
+INFO:     Started reloader process [10243] using WatchFiles
+INFO:     Started server process [10245]
+INFO:     Waiting for application startup.
+2026-04-01 23:23:02,036 [INFO] app.main — GPU Worker started | env=production | default_model=yue-base | yue_path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | auth=enabled
+INFO:     Application startup complete.
+INFO:     127.0.0.1:38322 - "GET /health HTTP/1.1" 200 OK
+2026-04-01 23:23:10,169 [INFO] app.state — Loading YuE model | path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | trust_remote_code=False
+2026-04-01 23:23:11,859 [INFO] app.yue_adapter — Detecting model architecture | path=/root/YuE-s1-7B-anneal-en-icl
+2026-04-01 23:23:11,893 [INFO] app.yue_adapter — Detected config class: LlamaConfig
+2026-04-01 23:23:11,893 [INFO] app.yue_adapter — Resolved model family: causal (Llama/decoder-only path)
+2026-04-01 23:23:11,893 [INFO] app.state — Resolved model family: causal
+2026-04-01 23:23:12,597 [INFO] app.yue_adapter — Loading causal LM (AutoModelForCausalLM) | path=/root/YuE-s1-7B-anneal-en-icl
+Loading weights: 100%|███████████████████████████████████████████████████████████████| 291/291 [00:00<00:00, 320.62it/s]
+2026-04-01 23:23:15,716 [INFO] app.yue_adapter — Causal model + tokenizer loaded successfully
+2026-04-01 23:23:15,718 [DEBUG] app.yue_adapter — Reset torch default device to None.
+2026-04-01 23:23:15,718 [INFO] app.yue_adapter — Loading xcodec2 codec | path=/root/xcodec2 | device=cuda
+2026-04-01 23:23:15,718 [DEBUG] app.yue_adapter — Reset torch default device to None.
+2026-04-01 23:23:15,728 [DEBUG] torio._extension.utils — Loading FFmpeg6
+2026-04-01 23:23:15,729 [DEBUG] torio._extension.utils — Failed to load FFmpeg6 extension.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torch/_ops.py", line 1350, in load_library
+    ctypes.CDLL(path)
+  File "/usr/lib/python3.10/ctypes/__init__.py", line 374, in __init__
+    self._handle = _dlopen(self._name, mode)
+OSError: libavutil.so.58: cannot open shared object file: No such file or directory
+2026-04-01 23:23:15,730 [DEBUG] torio._extension.utils — Loading FFmpeg5
+2026-04-01 23:23:15,730 [DEBUG] torio._extension.utils — Failed to load FFmpeg5 extension.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torch/_ops.py", line 1350, in load_library
+    ctypes.CDLL(path)
+  File "/usr/lib/python3.10/ctypes/__init__.py", line 374, in __init__
+    self._handle = _dlopen(self._name, mode)
+OSError: libavutil.so.57: cannot open shared object file: No such file or directory
+2026-04-01 23:23:15,730 [DEBUG] torio._extension.utils — Loading FFmpeg4
+2026-04-01 23:23:15,764 [DEBUG] torio._extension.utils — Successfully loaded FFmpeg4
+2026-04-01 23:23:15,907 [INFO] root — lm_eval is not installed, GPTQ may not be usable
+2026-04-01 23:23:16,666 [DEBUG] datasets — PyTorch version 2.5.0 available.
+2026-04-01 23:23:16,994 [DEBUG] app.yue_adapter — Reset torch default device to None.
+2026-04-01 23:23:16,994 [DEBUG] app.yue_adapter — model_cls.from_pretrained failed: 'NoneType' object has no attribute 'device' — falling back to manual weight load.
+You are using a model of type `xcodec2` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-04-01 23:23:17,016 [DEBUG] httpcore.connection — connect_tcp.started host='huggingface.co' port=443 local_address=None timeout=10 socket_options=None
+2026-04-01 23:23:17,076 [DEBUG] httpcore.connection — connect_tcp.complete return_value=<httpcore._backends.sync.SyncStream object at 0x7e90119ccbb0>
+2026-04-01 23:23:17,076 [DEBUG] httpcore.connection — start_tls.started ssl_context=<ssl.SSLContext object at 0x7e903e754d40> server_hostname='huggingface.co' timeout=10
+2026-04-01 23:23:17,102 [DEBUG] httpcore.connection — start_tls.complete return_value=<httpcore._backends.sync.SyncStream object at 0x7e90119ccb80>
+2026-04-01 23:23:17,102 [DEBUG] httpcore.http11 — send_request_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,102 [DEBUG] httpcore.http11 — send_request_headers.complete
+2026-04-01 23:23:17,103 [DEBUG] httpcore.http11 — send_request_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,103 [DEBUG] httpcore.http11 — send_request_body.complete
+2026-04-01 23:23:17,103 [DEBUG] httpcore.http11 — receive_response_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,254 [DEBUG] httpcore.http11 — receive_response_headers.complete return_value=(b'HTTP/1.1', 307, b'Temporary Redirect', [(b'Content-Type', b'text/plain; charset=utf-8'), (b'Content-Length', b'246'), (b'Connection', b'keep-alive'), (b'Date', b'Wed, 01 Apr 2026 23:23:17 GMT'), (b'Location', b'/api/resolve-cache/models/facebook/w2v-bert-2.0/da985ba0987f70aaeb84a80f2851cfac8c697a7b/config.json?%2Ffacebook%2Fw2v-bert-2.0%2Fresolve%2Fmain%2Fconfig.json=&etag=%22a383a594dac18459628cd2837168cd276342a31a%22'), (b'X-Powered-By', b'huggingface-moon'), (b'X-Request-Id', b'Root=1-69cda8e5-00638e6874acb4f93e411f03;e2fd62e5-0daf-4cf7-b28f-831c25023646'), (b'RateLimit', b'"resolvers";r=2999;t=213'), (b'RateLimit-Policy', b'"fixed window";"resolvers";q=3000;w=300'), (b'cross-origin-opener-policy', b'same-origin'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'Access-Control-Max-Age', b'86400'), (b'Access-Control-Allow-Origin', b'https://huggingface.co'), (b'Vary', b'Origin, Accept'), (b'Access-Control-Expose-Headers', b'X-Repo-Commit,X-Request-Id,X-Error-Code,X-Error-Message,X-Total-Count,ETag,Link,Accept-Ranges,Content-Range,X-Linked-Size,X-Linked-ETag,X-Xet-Hash'), (b'X-Repo-Commit', b'da985ba0987f70aaeb84a80f2851cfac8c697a7b'), (b'Accept-Ranges', b'bytes'), (b'X-HF-Warning', b'unauthenticated; Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.'), (b'X-Hub-Cache', b'HIT'), (b'Content-Disposition', b'inline; filename*=UTF-8\'\'config.json; filename="config.json";'), (b'Content-Security-Policy', b"default-src 'none'; sandbox"), (b'X-Linked-ETag', b'"a383a594dac18459628cd2837168cd276342a31a"'), (b'X-Cache', b'Miss from cloudfront'), (b'Via', b'1.1 8034240bc73cbc26a074c52ff1c1c87a.cloudfront.net (CloudFront)'), (b'X-Amz-Cf-Pop', b'HEL51-P6'), (b'X-Amz-Cf-Id', b'8kgbPxGtXH7Olla1rCyUuIy-SyseHgY8ViHtxaTTBUmhsx8j3mcapg==')])
+2026-04-01 23:23:17,255 [INFO] httpx — HTTP Request: HEAD https://huggingface.co/facebook/w2v-bert-2.0/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+2026-04-01 23:23:17,256 [DEBUG] httpcore.http11 — receive_response_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,256 [DEBUG] httpcore.http11 — receive_response_body.complete
+2026-04-01 23:23:17,256 [DEBUG] httpcore.http11 — response_closed.started
+2026-04-01 23:23:17,257 [DEBUG] httpcore.http11 — response_closed.complete
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-04-01 23:23:17,257 [WARNING] huggingface_hub.utils._http — Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-04-01 23:23:17,257 [DEBUG] httpcore.http11 — send_request_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,258 [DEBUG] httpcore.http11 — send_request_headers.complete
+2026-04-01 23:23:17,258 [DEBUG] httpcore.http11 — send_request_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,258 [DEBUG] httpcore.http11 — send_request_body.complete
+2026-04-01 23:23:17,258 [DEBUG] httpcore.http11 — receive_response_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,283 [DEBUG] httpcore.http11 — receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', [(b'Content-Type', b'text/plain; charset=utf-8'), (b'Content-Length', b'1874'), (b'Connection', b'keep-alive'), (b'Date', b'Wed, 25 Jun 2025 12:45:52 GMT'), (b'ETag', b'"a383a594dac18459628cd2837168cd276342a31a"'), (b'X-Powered-By', b'huggingface-moon'), (b'cross-origin-opener-policy', b'same-origin'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'X-Request-Id', b'Root=1-685bef80-54325efe0f3995ec7cd08bd3;c56f3660-e18f-4142-9352-c685768d045c'), (b'Access-Control-Allow-Origin', b'https://huggingface.co'), (b'Access-Control-Expose-Headers', b'X-Repo-Commit,X-Request-Id,X-Error-Code,X-Error-Message,X-Total-Count,ETag,Link,Accept-Ranges,Content-Range,X-Linked-Size,X-Linked-ETag,X-Xet-Hash'), (b'X-Repo-Commit', b'da985ba0987f70aaeb84a80f2851cfac8c697a7b'), (b'Accept-Ranges', b'bytes'), (b'X-Hub-Cache', b'HIT'), (b'Content-Disposition', b'inline; filename*=UTF-8\'\'config.json; filename="config.json";'), (b'Content-Security-Policy', b"default-src 'none'; sandbox"), (b'Vary', b'Origin'), (b'X-Cache', b'Hit from cloudfront'), (b'Via', b'1.1 8034240bc73cbc26a074c52ff1c1c87a.cloudfront.net (CloudFront)'), (b'X-Amz-Cf-Pop', b'HEL51-P6'), (b'X-Amz-Cf-Id', b'plLDnx53rsAy_EE3_634kd1nqt60iQfrYFSqJvGnxRUkE_3vvFT5Ow=='), (b'Age', b'24230245')])
+2026-04-01 23:23:17,283 [INFO] httpx — HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/facebook/w2v-bert-2.0/da985ba0987f70aaeb84a80f2851cfac8c697a7b/config.json "HTTP/1.1 200 OK"
+2026-04-01 23:23:17,284 [DEBUG] httpcore.http11 — receive_response_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,284 [DEBUG] httpcore.http11 — receive_response_body.complete
+2026-04-01 23:23:17,284 [DEBUG] httpcore.http11 — response_closed.started
+2026-04-01 23:23:17,284 [DEBUG] httpcore.http11 — response_closed.complete
+2026-04-01 23:23:17,289 [DEBUG] httpcore.http11 — send_request_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,289 [DEBUG] httpcore.http11 — send_request_headers.complete
+2026-04-01 23:23:17,289 [DEBUG] httpcore.http11 — send_request_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,289 [DEBUG] httpcore.http11 — send_request_body.complete
+2026-04-01 23:23:17,290 [DEBUG] httpcore.http11 — receive_response_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,444 [DEBUG] httpcore.http11 — receive_response_headers.complete return_value=(b'HTTP/1.1', 302, b'Found', [(b'Content-Type', b'text/plain; charset=utf-8'), (b'Content-Length', b'1351'), (b'Connection', b'keep-alive'), (b'Date', b'Wed, 01 Apr 2026 23:23:17 GMT'), (b'Location', b'https://cas-bridge.xethub.hf.co/xet-bridge-us/6581493d11f7f587918f0f15/fc15498859a8178dff862b2f2e36910a243a8692dbc1ecab04f9935b758c65eb?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=cas%2F20260401%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260401T232317Z&X-Amz-Expires=3600&X-Amz-Signature=8cd6d64bb21de08dc487872594ddbbbd31a8171aa029691500f016caba0394f8&X-Amz-SignedHeaders=host&X-Xet-Cas-Uid=public&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27model.safetensors%3B+filename%3D%22model.safetensors%22%3B&x-amz-checksum-mode=ENABLED&x-id=GetObject&Expires=1775089397&Policy=eyJTdGF0ZW1lbnQiOlt7IkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiQVdTOkVwb2NoVGltZSI6MTc3NTA4OTM5N319LCJSZXNvdXJjZSI6Imh0dHBzOi8vY2FzLWJyaWRnZS54ZXRodWIuaGYuY28veGV0LWJyaWRnZS11cy82NTgxNDkzZDExZjdmNTg3OTE4ZjBmMTUvZmMxNTQ5ODg1OWE4MTc4ZGZmODYyYjJmMmUzNjkxMGEyNDNhODY5MmRiYzFlY2FiMDRmOTkzNWI3NThjNjVlYioifV19&Signature=BlwpnvKpq18Cf5S1rq5k%7Ewi6DWzdwcaqRlxYgDP4f6CTOE7p%7E4LnQktGm0-1sCQh2NlPZ5ASct50Y%7Ekn5xghz42eEBV2ii4PHQlxba3qGDtZSepnjDs3pXmDeQVwkrzV3yFCHHpKJS%7EiMv4ydlyblCHuUk5YkrNWRG75K2L25-O3Q%7EoSZ5wXTVRWXwjVN14ZGI4aQJVuCekFfIVkqPucUmg8gcQrEtt1lMc-3aSp7Y-iL5PCE2zpqg6fBk7S6mXEYB-QMESaby7Qp4iAhqOibsg-giFq7E1q%7EdQmtZD1zsK6i-e-bDnhGsClObbWIkzdhcefRT2UMDS4ENx4G-JYuw__&Key-Pair-Id=K2L8F4GPSG1IFC'), (b'X-Powered-By', b'huggingface-moon'), (b'X-Request-Id', b'Root=1-69cda8e5-14aa003d66317b3d089523c1;bcd58e8d-ee43-43b9-8d0e-c424111c246e'), (b'RateLimit', b'"resolvers";r=2998;t=213'), (b'RateLimit-Policy', b'"fixed window";"resolvers";q=3000;w=300'), (b'cross-origin-opener-policy', b'same-origin'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'Access-Control-Max-Age', b'86400'), (b'Access-Control-Allow-Origin', b'https://huggingface.co'), (b'Vary', b'Origin, Accept'), (b'Access-Control-Expose-Headers', b'X-Repo-Commit,X-Request-Id,X-Error-Code,X-Error-Message,X-Total-Count,ETag,Link,Accept-Ranges,Content-Range,X-Linked-Size,X-Linked-ETag,X-Xet-Hash'), (b'X-Repo-Commit', b'da985ba0987f70aaeb84a80f2851cfac8c697a7b'), (b'Accept-Ranges', b'bytes'), (b'X-Hub-Cache', b'HIT'), (b'X-Linked-Size', b'2322063736'), (b'X-Linked-ETag', b'"eb890c9660ed6e3414b6812e27257b8ce5454365d5490d3ad581ea60b93be043"'), (b'X-Xet-Hash', b'fc15498859a8178dff862b2f2e36910a243a8692dbc1ecab04f9935b758c65eb'), (b'Link', b'<https://huggingface.co/api/models/facebook/w2v-bert-2.0/xet-read-token/da985ba0987f70aaeb84a80f2851cfac8c697a7b>; rel="xet-auth", <https://cas-server.xethub.hf.co/v1/reconstructions/fc15498859a8178dff862b2f2e36910a243a8692dbc1ecab04f9935b758c65eb>; rel="xet-reconstruction-info"'), (b'X-Cache', b'Miss from cloudfront'), (b'Via', b'1.1 8034240bc73cbc26a074c52ff1c1c87a.cloudfront.net (CloudFront)'), (b'X-Amz-Cf-Pop', b'HEL51-P6'), (b'X-Amz-Cf-Id', b'TTZRbXVlUSfrZCdtKhQ-MPVqH-wIkb7qwnoOcvDs9Rs0QZanrzlR6Q==')])
+2026-04-01 23:23:17,445 [INFO] httpx — HTTP Request: HEAD https://huggingface.co/facebook/w2v-bert-2.0/resolve/main/model.safetensors "HTTP/1.1 302 Found"
+2026-04-01 23:23:17,445 [DEBUG] httpcore.http11 — receive_response_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:17,445 [DEBUG] httpcore.http11 — receive_response_body.complete
+2026-04-01 23:23:17,446 [DEBUG] httpcore.http11 — response_closed.started
+2026-04-01 23:23:17,446 [DEBUG] httpcore.http11 — response_closed.complete
+Loading weights: 100%|██████████████████████████████████████████████████████████████| 773/773 [00:00<00:00, 5691.61it/s]
+/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torch/nn/utils/weight_norm.py:143: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+2026-04-01 23:23:18,392 [DEBUG] watchfiles.main — 3 changes detected: {(<Change.deleted: 3>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einops/__pycache__/_torch_specific.cpython-310.pyc.139157196561680'), (<Change.added: 1>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einops/__pycache__/_torch_specific.cpython-310.pyc.139157196561680'), (<Change.added: 1>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einops/__pycache__/_torch_specific.cpython-310.pyc')}
+2026-04-01 23:23:18,743 [DEBUG] watchfiles.main — 1 change detected: {(<Change.added: 1>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torch/backends/opt_einsum/__pycache__')}
+2026-04-01 23:23:19,388 [DEBUG] httpcore.http11 — send_request_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,388 [DEBUG] httpcore.http11 — send_request_headers.complete
+2026-04-01 23:23:19,388 [DEBUG] httpcore.http11 — send_request_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,388 [DEBUG] httpcore.http11 — send_request_body.complete
+2026-04-01 23:23:19,388 [DEBUG] httpcore.http11 — receive_response_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,546 [DEBUG] httpcore.http11 — receive_response_headers.complete return_value=(b'HTTP/1.1', 404, b'Not Found', [(b'Content-Type', b'text/plain; charset=utf-8'), (b'Content-Length', b'15'), (b'Connection', b'keep-alive'), (b'Date', b'Wed, 01 Apr 2026 23:23:19 GMT'), (b'ETag', b'W/"f-mY2VvLxuxB7KhsoOdQTlMTccuAQ"'), (b'X-Powered-By', b'huggingface-moon'), (b'X-Request-Id', b'Root=1-69cda8e7-64fcaf0e3f50ffda03ca4a5c;70c9125d-6122-4b33-ad9e-92c28e408c59'), (b'RateLimit', b'"resolvers";r=2997;t=211'), (b'RateLimit-Policy', b'"fixed window";"resolvers";q=3000;w=300'), (b'cross-origin-opener-policy', b'same-origin'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'Access-Control-Max-Age', b'86400'), (b'Access-Control-Allow-Origin', b'https://huggingface.co'), (b'Vary', b'Origin'), (b'Access-Control-Expose-Headers', b'X-Repo-Commit,X-Request-Id,X-Error-Code,X-Error-Message,X-Total-Count,ETag,Link,Accept-Ranges,Content-Range,X-Linked-Size,X-Linked-ETag,X-Xet-Hash'), (b'X-Repo-Commit', b'da985ba0987f70aaeb84a80f2851cfac8c697a7b'), (b'Accept-Ranges', b'bytes'), (b'X-Hub-Cache', b'MISS'), (b'X-Error-Code', b'EntryNotFound'), (b'X-Error-Message', b'Entry not found'), (b'X-Cache', b'Error from cloudfront'), (b'Via', b'1.1 8034240bc73cbc26a074c52ff1c1c87a.cloudfront.net (CloudFront)'), (b'X-Amz-Cf-Pop', b'HEL51-P6'), (b'X-Amz-Cf-Id', b'iiG0EyHOieZCPFB_Z34KhCmwpfRMUFWh32N74roaONnhMsDuQI00BA==')])
+2026-04-01 23:23:19,546 [INFO] httpx — HTTP Request: HEAD https://huggingface.co/facebook/w2v-bert-2.0/resolve/main/processor_config.json "HTTP/1.1 404 Not Found"
+2026-04-01 23:23:19,546 [DEBUG] httpcore.http11 — receive_response_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,546 [DEBUG] httpcore.http11 — receive_response_body.complete
+2026-04-01 23:23:19,547 [DEBUG] httpcore.http11 — response_closed.started
+2026-04-01 23:23:19,547 [DEBUG] httpcore.http11 — response_closed.complete
+2026-04-01 23:23:19,548 [DEBUG] httpcore.http11 — send_request_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,548 [DEBUG] httpcore.http11 — send_request_headers.complete
+2026-04-01 23:23:19,548 [DEBUG] httpcore.http11 — send_request_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,548 [DEBUG] httpcore.http11 — send_request_body.complete
+2026-04-01 23:23:19,548 [DEBUG] httpcore.http11 — receive_response_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,698 [DEBUG] httpcore.http11 — receive_response_headers.complete return_value=(b'HTTP/1.1', 307, b'Temporary Redirect', [(b'Content-Type', b'text/plain; charset=utf-8'), (b'Content-Length', b'272'), (b'Connection', b'keep-alive'), (b'Date', b'Wed, 01 Apr 2026 23:23:19 GMT'), (b'Location', b'/api/resolve-cache/models/facebook/w2v-bert-2.0/da985ba0987f70aaeb84a80f2851cfac8c697a7b/preprocessor_config.json?%2Ffacebook%2Fw2v-bert-2.0%2Fresolve%2Fmain%2Fpreprocessor_config.json=&etag=%225db61951cdf5edab6337fd84ee619500c27aaa3d%22'), (b'X-Powered-By', b'huggingface-moon'), (b'X-Request-Id', b'Root=1-69cda8e7-15adf2c96f63beae7ac3b4a4;7f2a42e6-e3e0-4fed-bb1a-4e3035eae10b'), (b'RateLimit', b'"resolvers";r=2996;t=211'), (b'RateLimit-Policy', b'"fixed window";"resolvers";q=3000;w=300'), (b'cross-origin-opener-policy', b'same-origin'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'Access-Control-Max-Age', b'86400'), (b'Access-Control-Allow-Origin', b'https://huggingface.co'), (b'Vary', b'Origin, Accept'), (b'Access-Control-Expose-Headers', b'X-Repo-Commit,X-Request-Id,X-Error-Code,X-Error-Message,X-Total-Count,ETag,Link,Accept-Ranges,Content-Range,X-Linked-Size,X-Linked-ETag,X-Xet-Hash'), (b'X-Repo-Commit', b'da985ba0987f70aaeb84a80f2851cfac8c697a7b'), (b'Accept-Ranges', b'bytes'), (b'X-HF-Warning', b'unauthenticated; Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.'), (b'X-Hub-Cache', b'HIT'), (b'Content-Disposition', b'inline; filename*=UTF-8\'\'preprocessor_config.json; filename="preprocessor_config.json";'), (b'Content-Security-Policy', b"default-src 'none'; sandbox"), (b'X-Linked-ETag', b'"5db61951cdf5edab6337fd84ee619500c27aaa3d"'), (b'X-Cache', b'Miss from cloudfront'), (b'Via', b'1.1 8034240bc73cbc26a074c52ff1c1c87a.cloudfront.net (CloudFront)'), (b'X-Amz-Cf-Pop', b'HEL51-P6'), (b'X-Amz-Cf-Id', b'ZgM8N8E9_PiDPpn7OyvOkoLtgkdK6521j-5p5_5NDv5-0Pw3RWvabg==')])
+2026-04-01 23:23:19,698 [INFO] httpx — HTTP Request: HEAD https://huggingface.co/facebook/w2v-bert-2.0/resolve/main/preprocessor_config.json "HTTP/1.1 307 Temporary Redirect"
+2026-04-01 23:23:19,699 [DEBUG] httpcore.http11 — receive_response_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,699 [DEBUG] httpcore.http11 — receive_response_body.complete
+2026-04-01 23:23:19,699 [DEBUG] httpcore.http11 — response_closed.started
+2026-04-01 23:23:19,699 [DEBUG] httpcore.http11 — response_closed.complete
+2026-04-01 23:23:19,700 [DEBUG] httpcore.http11 — send_request_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,700 [DEBUG] httpcore.http11 — send_request_headers.complete
+2026-04-01 23:23:19,700 [DEBUG] httpcore.http11 — send_request_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,700 [DEBUG] httpcore.http11 — send_request_body.complete
+2026-04-01 23:23:19,700 [DEBUG] httpcore.http11 — receive_response_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,725 [DEBUG] httpcore.http11 — receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', [(b'Content-Type', b'text/plain; charset=utf-8'), (b'Content-Length', b'275'), (b'Connection', b'keep-alive'), (b'Date', b'Sat, 30 Aug 2025 14:56:27 GMT'), (b'ETag', b'"5db61951cdf5edab6337fd84ee619500c27aaa3d"'), (b'X-Powered-By', b'huggingface-moon'), (b'cross-origin-opener-policy', b'same-origin'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'X-Request-Id', b'Root=1-68b3111b-003d63f70cd3a1a871d4536e;8a6c293b-66dd-4f2e-b5ea-1aff875b8ade'), (b'Access-Control-Allow-Origin', b'https://huggingface.co'), (b'Access-Control-Expose-Headers', b'X-Repo-Commit,X-Request-Id,X-Error-Code,X-Error-Message,X-Total-Count,ETag,Link,Accept-Ranges,Content-Range,X-Linked-Size,X-Linked-ETag,X-Xet-Hash'), (b'X-Repo-Commit', b'da985ba0987f70aaeb84a80f2851cfac8c697a7b'), (b'Accept-Ranges', b'bytes'), (b'Content-Disposition', b'inline; filename*=UTF-8\'\'preprocessor_config.json; filename="preprocessor_config.json";'), (b'Content-Security-Policy', b"default-src 'none'; sandbox"), (b'Vary', b'Origin'), (b'X-Cache', b'Hit from cloudfront'), (b'Via', b'1.1 8034240bc73cbc26a074c52ff1c1c87a.cloudfront.net (CloudFront)'), (b'X-Amz-Cf-Pop', b'HEL51-P6'), (b'X-Amz-Cf-Id', b'kVEl-_uHxsFZM01ytrANigZPC7K6CGBQNZyIcjViul3Vxa0nN9OyAA=='), (b'Age', b'18520012')])
+2026-04-01 23:23:19,725 [INFO] httpx — HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/facebook/w2v-bert-2.0/da985ba0987f70aaeb84a80f2851cfac8c697a7b/preprocessor_config.json "HTTP/1.1 200 OK"
+2026-04-01 23:23:19,725 [DEBUG] httpcore.http11 — receive_response_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,725 [DEBUG] httpcore.http11 — receive_response_body.complete
+2026-04-01 23:23:19,725 [DEBUG] httpcore.http11 — response_closed.started
+2026-04-01 23:23:19,726 [DEBUG] httpcore.http11 — response_closed.complete
+2026-04-01 23:23:19,734 [DEBUG] httpcore.http11 — send_request_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,734 [DEBUG] httpcore.http11 — send_request_headers.complete
+2026-04-01 23:23:19,734 [DEBUG] httpcore.http11 — send_request_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,735 [DEBUG] httpcore.http11 — send_request_body.complete
+2026-04-01 23:23:19,735 [DEBUG] httpcore.http11 — receive_response_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,798 [DEBUG] watchfiles.main — 9 changes detected: {(<Change.added: 1>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/__pycache__/feature_extraction_sequence_utils.cpython-310.pyc'), (<Change.added: 1>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/models/seamless_m4t/__pycache__/__init__.cpython-310.pyc'), (<Change.added: 1>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/models/seamless_m4t/__pycache__/feature_extraction_seamless_m4t.cpython-310.pyc'), (<Change.deleted: 3>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/models/seamless_m4t/__pycache__/feature_extraction_seamless_m4t.cpython-310.pyc.139157231950672'), (<Change.deleted: 3>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/__pycache__/feature_extraction_sequence_utils.cpython-310.pyc.139157237604528'), (<Change.added: 1>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/models/seamless_m4t/__pycache__/feature_extraction_seamless_m4t.cpython-310.pyc.139157231950672'), (<Change.deleted: 3>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/models/seamless_m4t/__pycache__/__init__.cpython-310.pyc.139157235603888'), (<Change.added: 1>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/__pycache__/feature_extraction_sequence_utils.cpython-310.pyc.139157237604528'), (<Change.added: 1>, '/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/models/seamless_m4t/__pycache__')}
+2026-04-01 23:23:19,888 [DEBUG] httpcore.http11 — receive_response_headers.complete return_value=(b'HTTP/1.1', 404, b'Not Found', [(b'Content-Type', b'text/plain; charset=utf-8'), (b'Content-Length', b'15'), (b'Connection', b'keep-alive'), (b'Date', b'Wed, 01 Apr 2026 23:23:19 GMT'), (b'ETag', b'W/"f-mY2VvLxuxB7KhsoOdQTlMTccuAQ"'), (b'X-Powered-By', b'huggingface-moon'), (b'X-Request-Id', b'Root=1-69cda8e7-405520e72871f8e8071446a4;72e78d2a-a210-4a7b-9557-1578810ef700'), (b'RateLimit', b'"resolvers";r=2995;t=211'), (b'RateLimit-Policy', b'"fixed window";"resolvers";q=3000;w=300'), (b'cross-origin-opener-policy', b'same-origin'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'Access-Control-Max-Age', b'86400'), (b'Access-Control-Allow-Origin', b'https://huggingface.co'), (b'Vary', b'Origin'), (b'Access-Control-Expose-Headers', b'X-Repo-Commit,X-Request-Id,X-Error-Code,X-Error-Message,X-Total-Count,ETag,Link,Accept-Ranges,Content-Range,X-Linked-Size,X-Linked-ETag,X-Xet-Hash'), (b'X-Repo-Commit', b'da985ba0987f70aaeb84a80f2851cfac8c697a7b'), (b'Accept-Ranges', b'bytes'), (b'X-HF-Warning', b'unauthenticated; Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.'), (b'X-Hub-Cache', b'MISS'), (b'X-Error-Code', b'EntryNotFound'), (b'X-Error-Message', b'Entry not found'), (b'X-Cache', b'Error from cloudfront'), (b'Via', b'1.1 8034240bc73cbc26a074c52ff1c1c87a.cloudfront.net (CloudFront)'), (b'X-Amz-Cf-Pop', b'HEL51-P6'), (b'X-Amz-Cf-Id', b'RENSMCgb6UISOUMwaavWYTw5JUqgsFhps068YRfiXCiZXGfcBfHa3w==')])
+2026-04-01 23:23:19,889 [INFO] httpx — HTTP Request: HEAD https://huggingface.co/facebook/w2v-bert-2.0/resolve/main/processor_config.json "HTTP/1.1 404 Not Found"
+2026-04-01 23:23:19,889 [DEBUG] httpcore.http11 — receive_response_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,889 [DEBUG] httpcore.http11 — receive_response_body.complete
+2026-04-01 23:23:19,889 [DEBUG] httpcore.http11 — response_closed.started
+2026-04-01 23:23:19,889 [DEBUG] httpcore.http11 — response_closed.complete
+2026-04-01 23:23:19,891 [DEBUG] httpcore.http11 — send_request_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,891 [DEBUG] httpcore.http11 — send_request_headers.complete
+2026-04-01 23:23:19,891 [DEBUG] httpcore.http11 — send_request_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:19,891 [DEBUG] httpcore.http11 — send_request_body.complete
+2026-04-01 23:23:19,891 [DEBUG] httpcore.http11 — receive_response_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:20,040 [DEBUG] httpcore.http11 — receive_response_headers.complete return_value=(b'HTTP/1.1', 307, b'Temporary Redirect', [(b'Content-Type', b'text/plain; charset=utf-8'), (b'Content-Length', b'272'), (b'Connection', b'keep-alive'), (b'Date', b'Wed, 01 Apr 2026 23:23:19 GMT'), (b'Location', b'/api/resolve-cache/models/facebook/w2v-bert-2.0/da985ba0987f70aaeb84a80f2851cfac8c697a7b/preprocessor_config.json?%2Ffacebook%2Fw2v-bert-2.0%2Fresolve%2Fmain%2Fpreprocessor_config.json=&etag=%225db61951cdf5edab6337fd84ee619500c27aaa3d%22'), (b'X-Powered-By', b'huggingface-moon'), (b'X-Request-Id', b'Root=1-69cda8e7-74cbe6865a03a88b4c882fc9;36a51d29-9b5a-446c-861c-f1c646204e95'), (b'RateLimit', b'"resolvers";r=2994;t=211'), (b'RateLimit-Policy', b'"fixed window";"resolvers";q=3000;w=300'), (b'cross-origin-opener-policy', b'same-origin'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'Access-Control-Max-Age', b'86400'), (b'Access-Control-Allow-Origin', b'https://huggingface.co'), (b'Vary', b'Origin, Accept'), (b'Access-Control-Expose-Headers', b'X-Repo-Commit,X-Request-Id,X-Error-Code,X-Error-Message,X-Total-Count,ETag,Link,Accept-Ranges,Content-Range,X-Linked-Size,X-Linked-ETag,X-Xet-Hash'), (b'X-Repo-Commit', b'da985ba0987f70aaeb84a80f2851cfac8c697a7b'), (b'Accept-Ranges', b'bytes'), (b'X-Hub-Cache', b'HIT'), (b'Content-Disposition', b'inline; filename*=UTF-8\'\'preprocessor_config.json; filename="preprocessor_config.json";'), (b'Content-Security-Policy', b"default-src 'none'; sandbox"), (b'X-Linked-ETag', b'"5db61951cdf5edab6337fd84ee619500c27aaa3d"'), (b'X-Cache', b'Miss from cloudfront'), (b'Via', b'1.1 8034240bc73cbc26a074c52ff1c1c87a.cloudfront.net (CloudFront)'), (b'X-Amz-Cf-Pop', b'HEL51-P6'), (b'X-Amz-Cf-Id', b'nzOvj3Kl96sE8Jkh2K2d6S1bNTx_tvfX9anEivybFqkboRv5wCQiCA==')])
+2026-04-01 23:23:20,040 [INFO] httpx — HTTP Request: HEAD https://huggingface.co/facebook/w2v-bert-2.0/resolve/main/preprocessor_config.json "HTTP/1.1 307 Temporary Redirect"
+2026-04-01 23:23:20,041 [DEBUG] httpcore.http11 — receive_response_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:20,041 [DEBUG] httpcore.http11 — receive_response_body.complete
+2026-04-01 23:23:20,041 [DEBUG] httpcore.http11 — response_closed.started
+2026-04-01 23:23:20,041 [DEBUG] httpcore.http11 — response_closed.complete
+2026-04-01 23:23:20,042 [DEBUG] httpcore.http11 — send_request_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:20,042 [DEBUG] httpcore.http11 — send_request_headers.complete
+2026-04-01 23:23:20,043 [DEBUG] httpcore.http11 — send_request_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:20,043 [DEBUG] httpcore.http11 — send_request_body.complete
+2026-04-01 23:23:20,043 [DEBUG] httpcore.http11 — receive_response_headers.started request=<Request [b'HEAD']>
+2026-04-01 23:23:20,069 [DEBUG] httpcore.http11 — receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', [(b'Content-Type', b'text/plain; charset=utf-8'), (b'Content-Length', b'275'), (b'Connection', b'keep-alive'), (b'Date', b'Sat, 30 Aug 2025 14:56:27 GMT'), (b'ETag', b'"5db61951cdf5edab6337fd84ee619500c27aaa3d"'), (b'X-Powered-By', b'huggingface-moon'), (b'cross-origin-opener-policy', b'same-origin'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'X-Request-Id', b'Root=1-68b3111b-003d63f70cd3a1a871d4536e;8a6c293b-66dd-4f2e-b5ea-1aff875b8ade'), (b'Access-Control-Allow-Origin', b'https://huggingface.co'), (b'Access-Control-Expose-Headers', b'X-Repo-Commit,X-Request-Id,X-Error-Code,X-Error-Message,X-Total-Count,ETag,Link,Accept-Ranges,Content-Range,X-Linked-Size,X-Linked-ETag,X-Xet-Hash'), (b'X-Repo-Commit', b'da985ba0987f70aaeb84a80f2851cfac8c697a7b'), (b'Accept-Ranges', b'bytes'), (b'Content-Disposition', b'inline; filename*=UTF-8\'\'preprocessor_config.json; filename="preprocessor_config.json";'), (b'Content-Security-Policy', b"default-src 'none'; sandbox"), (b'Vary', b'Origin'), (b'X-Cache', b'Hit from cloudfront'), (b'Via', b'1.1 8034240bc73cbc26a074c52ff1c1c87a.cloudfront.net (CloudFront)'), (b'X-Amz-Cf-Pop', b'HEL51-P6'), (b'X-Amz-Cf-Id', b'iHViru8tOc0m7vtg1hzWUbnw-SmdnO4xZV4_AQFpXSaZ2hr2euY8AA=='), (b'Age', b'18520013')])
+2026-04-01 23:23:20,070 [INFO] httpx — HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/facebook/w2v-bert-2.0/da985ba0987f70aaeb84a80f2851cfac8c697a7b/preprocessor_config.json "HTTP/1.1 200 OK"
+2026-04-01 23:23:20,070 [DEBUG] httpcore.http11 — receive_response_body.started request=<Request [b'HEAD']>
+2026-04-01 23:23:20,070 [DEBUG] httpcore.http11 — receive_response_body.complete
+2026-04-01 23:23:20,070 [DEBUG] httpcore.http11 — response_closed.started
+2026-04-01 23:23:20,070 [DEBUG] httpcore.http11 — response_closed.complete
+2026-04-01 23:23:20,115 [DEBUG] app.yue_adapter — Loaded 1 safetensors weight files.
+2026-04-01 23:23:20,380 [DEBUG] app.yue_adapter — Missing keys in codec state_dict: ['CodecEnc.conv_blocks.1.block.0.block.0.act.bias', 'CodecEnc.conv_blocks.1.block.0.block.2.act.bias', 'CodecEnc.conv_blocks.1.block.1.block.0.act.bias', 'CodecEnc.conv_blocks.1.block.1.block.2.act.bias', 'CodecEnc.conv_blocks.1.block.2.block.0.act.bias']
+2026-04-01 23:23:20,380 [DEBUG] app.yue_adapter — Unexpected keys in codec state_dict: ['CodecEnc.conv_blocks.1.block.0.block.0.act.beta', 'CodecEnc.conv_blocks.1.block.0.block.2.act.beta', 'CodecEnc.conv_blocks.1.block.1.block.0.act.beta', 'CodecEnc.conv_blocks.1.block.1.block.2.act.beta', 'CodecEnc.conv_blocks.1.block.2.block.0.act.beta']
+2026-04-01 23:23:20,806 [INFO] app.yue_adapter — xcodec2 loaded via manual weights | device=cuda
+2026-04-01 23:23:20,807 [INFO] app.state — YuE model ready | model=yue-base | family=causal | device=cuda | dtype=fp16 | load_time=10.6s
+INFO:     127.0.0.1:38322 - "POST /load-model HTTP/1.1" 200 OK
+2026-04-01 23:23:20,816 [INFO] app.routes.generate — Generation start | job=e2c648cd-95e8-474c-88db-b95deca72181 | model=yue-base | family=causal | stub=False | style=hip_hop | duration=10s | seed=None
+2026-04-01 23:23:20,817 [INFO] app.yue_adapter — Causal inference start | job=e2c648cd-95e8-474c-88db-b95deca72181 | prompt_chars=609 | duration=10s | codec_loaded=True | text_vocab_size=32000
+2026-04-01 23:23:20,819 [INFO] app.yue_adapter — Token budget | prompt=203 | max_new=6000 | ctx_limit=16384 | ideal=6000
+2026-04-01 23:25:01,500 [INFO] app.yue_adapter — Token extraction | generated=6000 | audio=5630 | text_vocab_size=32000
+2026-04-01 23:25:01,500 [WARNING] app.yue_adapter — Audio token count 5630 not divisible by n_codebooks=8 — dropping last 6 tokens.
+2026-04-01 23:25:01,500 [INFO] app.yue_adapter — Decoding | codes_shape=[1, 8, 703] | n_codebooks=8 | seq_len=703
+2026-04-01 23:25:01,503 [ERROR] app.routes.generate — Inference failed | job=e2c648cd-95e8-474c-88db-b95deca72181 | error=Failed to determine the size of all axes in the expression under the given constraints.
+Expression: "q [c] d, b n q -> q b n d"
+
+The expression, tensor shapes and contraints resulted in the following equation(s):
+    q [c] d = 1 65536 8
+    b n q = 1 703 8
+    1 = 1
+The operation was called with the following arguments:
+  - Positional argument #1: Tensor with shape (1, 65536, 8)
+  - Positional argument #2: Tensor with shape (1, 703, 8)
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einx/_src/namedtensor/stage3/solve.py", line 106, in solve
+    axis_values = solve(equations)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einx/_src/namedtensor/stage3/solve.py", line 75, in solve
+    solutions = solver.solve(equations)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einx/_src/util/solver.py", line 219, in solve
+    raise SolveExceptionNoSolution("Found contradictory constants for same equivalence class", contradicting_variables)
+einx._src.util.solver.SolveExceptionNoSolution: Found contradictory constants for same equivalence class
+Contradicting variables: q, q, 8, q, 1, unnamed.80877180833204766673642742863856640880, q, unnamed.119730502359375906774896074878107227527
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/app/routes/generate.py", line 105, in generate
+    await loop.run_in_executor(
+  File "/usr/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/root/song_weaver/artifacts/gpu-worker/app/routes/generate.py", line 182, in _run_inference
+    run_yue_inference(
+  File "/root/song_weaver/artifacts/gpu-worker/app/yue_adapter.py", line 493, in run_yue_inference
+    _run_causal_inference(
+  File "/root/song_weaver/artifacts/gpu-worker/app/yue_adapter.py", line 775, in _run_causal_inference
+    waveform = _decode_with_xcodec2(audio_codes_flat, codec, n_codebooks, device)
+  File "/root/song_weaver/artifacts/gpu-worker/app/yue_adapter.py", line 818, in _decode_with_xcodec2
+    return codec.decode_code(codes)
+  File "/root/xcodec2/modeling_xcodec2.py", line 192, in decode_code
+    vq_post_emb = self.generator.quantizer.get_output_from_indices(vq_code.transpose(1, 2))
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/vector_quantize_pytorch/residual_fsq.py", line 134, in get_output_from_indices
+    codes = self.get_codes_from_indices(indices)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/vector_quantize_pytorch/residual_fsq.py", line 116, in get_codes_from_indices
+    all_codes = get_at('q [c] d, b n q -> q b n d', self.codebooks, indices)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einx/_src/frontend/api.py", line 185, in inner
+    function, code = construct_graph_with_cache(args=args, kwargs=kwargs | {"backend": backend})
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einx/_src/util/lru_cache.py", line 37, in func_frozen
+    return func(*args, **kwargs)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einx/_src/frontend/api.py", line 131, in _construct_graph
+    output_tracer = func(*args, **kwargs)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einx/_src/frontend/ops.py", line 459, in get_at
+    return backend.get_at(description, *tensors, **parameters)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einx/_src/frontend/backend.py", line 54, in op
+    return self.ops[name](*args, **kwargs)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einx/_src/adapter/einx_from_namedtensor.py", line 591, in inner
+    exprs_in, exprs_out = solve(
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einx/_src/namedtensor/solve.py", line 117, in solve
+    exprs1, exprs2 = stage3.solve(equations, invocation=invocation)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/einx/_src/namedtensor/stage3/solve.py", line 124, in solve
+    raise AxisSizeError(
+einx.errors.AxisSizeError: Failed to determine the size of all axes in the expression under the given constraints.
+Expression: "q [c] d, b n q -> q b n d"
+
+The expression, tensor shapes and contraints resulted in the following equation(s):
+    q [c] d = 1 65536 8
+    b n q = 1 703 8
+    1 = 1
+The operation was called with the following arguments:
+  - Positional argument #1: Tensor with shape (1, 65536, 8)
+  - Positional argument #2: Tensor with shape (1, 703, 8)
+
+INFO:     127.0.0.1:38322 - "POST /generate HTTP/1.1" 500 Internal Server Error

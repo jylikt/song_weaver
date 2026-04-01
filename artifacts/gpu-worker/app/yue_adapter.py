@@ -266,6 +266,54 @@ def load_codec(
 
 # ─── Codec loading helpers ────────────────────────────────────────────────────
 
+def detect_codec_n_quantizers(codec: Any) -> Optional[int]:
+    """
+    Inspect a loaded xcodec2 codec and return the actual number of RVQ/FSQ
+    quantizer stages it uses.
+
+    xcodec2 from HKUSTAudio exposes:
+        codec.generator.quantizer          — ResidualFSQ instance
+        codec.generator.quantizer.codebooks — shape (n_q, codebook_size, dim)
+        codec.generator.quantizer.fsqs      — list of FSQ stages, len == n_q
+
+    Returns None when the structure cannot be determined so callers can fall
+    back gracefully to the configured yue_codec_n_codebooks value.
+    """
+    try:
+        # Primary path: codec.generator.quantizer (xcodec2 HKUSTAudio layout)
+        generator = getattr(codec, "generator", None)
+        if generator is not None:
+            quantizer = getattr(generator, "quantizer", None)
+            if quantizer is not None:
+                # Prefer codebooks tensor shape — ground truth
+                codebooks = getattr(quantizer, "codebooks", None)
+                if codebooks is not None:
+                    return int(codebooks.shape[0])
+                # Fall back to counting FSQ layers
+                for sub_attr in ("fsqs", "quantizers", "layers"):
+                    layers = getattr(quantizer, sub_attr, None)
+                    if layers is not None and hasattr(layers, "__len__"):
+                        return len(layers)
+
+        # Generic fallback: search common attribute paths
+        for parent_attr in ("quantizer", "vq", "residual_fsq"):
+            parent = getattr(codec, parent_attr, None)
+            if parent is None:
+                continue
+            codebooks = getattr(parent, "codebooks", None)
+            if codebooks is not None:
+                return int(codebooks.shape[0])
+            for sub_attr in ("fsqs", "quantizers", "layers"):
+                layers = getattr(parent, sub_attr, None)
+                if layers is not None and hasattr(layers, "__len__"):
+                    return len(layers)
+
+    except Exception:
+        pass
+
+    return None
+
+
 def _reset_default_device() -> None:
     """
     Clear any global torch default device left by prior model loading.
@@ -795,6 +843,12 @@ def _decode_with_xcodec2(
     import torch
 
     n_total = audio_codes_flat.shape[0]
+
+    logger.info(
+        "Decode | total_audio_tokens=%d | n_codebooks=%d (from codec auto-detect or config)",
+        n_total, n_codebooks,
+    )
+
     remainder = n_total % n_codebooks
     if remainder:
         logger.warning(
