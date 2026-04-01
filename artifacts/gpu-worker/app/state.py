@@ -7,16 +7,19 @@ This module owns the single source of truth for:
   - live GPU telemetry (VRAM, device name, temperature)
 
 All mutations go through async methods that hold self.lock, so concurrent
-/generate or /load-model requests cannot corrupt state. On a multi-GPU or
-multi-process deployment, replace this in-process lock with Redis or a
-shared-memory backend.
+/generate or /load-model requests cannot corrupt state.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 YUE INTEGRATION POINTS IN THIS FILE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  load_model()   — import and load YuE weights into VRAM
+  load_model()   — architecture-aware YuE weight loading into VRAM
   unload_model() — delete references and call torch.cuda.empty_cache()
   _refresh_gpu_telemetry() — reads real VRAM/temperature via torch.cuda
+
+Architecture detection uses AutoConfig to inspect the checkpoint before
+loading any weights. LlamaConfig (and other decoder-only configs) route
+to AutoModelForCausalLM; seq2seq configs route to AutoModelForSeq2SeqLM.
+Override with YUE_MODEL_FAMILY env var if auto-detection is wrong.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -57,6 +60,7 @@ class ModelState:
     loaded: bool = False
     model_name: Optional[str] = None
     stub_mode: bool = False      # True when YuE is not installed / path not configured
+    model_family: Optional[str] = None  # 'causal', 'seq2seq', or None in stub mode
     loaded_at: Optional[datetime] = None
     last_used_at: Optional[datetime] = None
     generation_count: int = 0
@@ -70,10 +74,11 @@ class WorkerState:
     Thread-safe holder for the live YuE model and all mutable worker state.
 
     Attributes set by load_model() and accessed by _run_inference():
-        _model      : the loaded YuE / HuggingFace model object
-        _processor  : the matching tokenizer / audio processor
-        _device     : torch.device the model lives on
-        _torch_dtype: dtype used during inference (float16 / bfloat16 / float32)
+        _model        : the loaded YuE / HuggingFace model object
+        _processor    : the matching tokenizer / audio processor
+        _device       : torch.device the model lives on
+        _torch_dtype  : dtype used during inference (float16 / bfloat16 / float32)
+        _model_family : resolved architecture family ('causal' or 'seq2seq')
     """
 
     def __init__(self) -> None:
@@ -85,8 +90,9 @@ class WorkerState:
         # Populated by load_model(); consumed by _run_inference() in generate.py
         self._model: Optional[Any] = None
         self._processor: Optional[Any] = None
-        self._device: Optional[Any] = None        # torch.device
-        self._torch_dtype: Optional[Any] = None   # torch dtype
+        self._device: Optional[Any] = None         # torch.device
+        self._torch_dtype: Optional[Any] = None    # torch dtype
+        self._model_family: Optional[str] = None   # 'causal' | 'seq2seq'
 
     @property
     def uptime_seconds(self) -> float:
@@ -96,15 +102,20 @@ class WorkerState:
 
     async def load_model(self, model_name: str) -> None:
         """
-        Load the YuE model into GPU (or CPU) memory.
+        Load the YuE model into GPU (or CPU) memory using architecture-aware
+        loader selection.
 
-        If YUE_MODEL_PATH is not set, falls back to stub mode so the worker
-        can be exercised in development without a GPU or model checkpoint.
+        Steps:
+          1. If YUE_MODEL_PATH is unset → stub mode (silent WAV, no weights).
+          2. Resolve device and dtype from settings.
+          3. Detect model family via AutoConfig (or use YUE_MODEL_FAMILY override).
+          4. Load weights with the correct loader class.
+          5. Store references and update metadata.
 
-        The asyncio lock is held for the duration of loading so concurrent
-        /generate calls block cleanly rather than racing.
+        Raises RuntimeError with actionable messages on any failure.
         """
-        from app.config import settings
+        from app.config import ModelFamily, settings
+        from app.yue_adapter import detect_model_family, load_model_and_processor
 
         async with self.lock:
             model_path = settings.yue_model_path or ""
@@ -117,8 +128,10 @@ class WorkerState:
                 )
                 self._model = None
                 self._processor = None
+                self._model_family = None
                 self.model.loaded = True
                 self.model.stub_mode = True
+                self.model.model_family = None
                 self.model.model_name = model_name
                 self.model.loaded_at = datetime.utcnow()
                 return
@@ -126,10 +139,11 @@ class WorkerState:
             # ── Real YuE model loading ─────────────────────────────────────────
             t_start = time.perf_counter()
             logger.info(
-                "Loading YuE model | path=%s | device=%s | dtype=%s",
+                "Loading YuE model | path=%s | device=%s | dtype=%s | trust_remote_code=%s",
                 model_path,
                 settings.yue_device,
                 settings.yue_dtype,
+                settings.yue_trust_remote_code,
             )
 
             try:
@@ -149,7 +163,7 @@ class WorkerState:
                 requested_device = "cpu"
             device = torch.device(requested_device)
 
-            # ── Resolve dtype ──────────────────────────────────────────────────
+            # ── Resolve dtype ─────────────────────────────────────────────────
             dtype_map = {
                 "fp16": torch.float16,
                 "bf16": torch.bfloat16,
@@ -162,85 +176,58 @@ class WorkerState:
                 )
                 torch_dtype = torch.float32
 
-            # ── Load YuE ──────────────────────────────────────────────────────
-            #
-            # YuE (M-A-P) can be loaded via the HuggingFace Transformers API.
-            # Adjust the import and class names to match the version you have
-            # installed.  Three common patterns:
-            #
-            # Pattern A — Official YuE pip package:
-            #   from yue.models import YuEForConditionalGeneration
-            #   from yue.tokenization import YuETokenizer
-            #   model = YuEForConditionalGeneration.from_pretrained(
-            #       model_path, torch_dtype=torch_dtype
-            #   )
-            #   processor = YuETokenizer.from_pretrained(model_path)
-            #
-            # Pattern B — HuggingFace AutoModel (if YuE is published on HF Hub):
-            #   from transformers import AutoModelForSeq2SeqLM, AutoProcessor
-            #   model = AutoModelForSeq2SeqLM.from_pretrained(
-            #       model_path, torch_dtype=torch_dtype
-            #   )
-            #   processor = AutoProcessor.from_pretrained(model_path)
-            #
-            # Pattern C — YuE source checkout (clone the repo alongside this worker):
-            #   import sys
-            #   sys.path.insert(0, "/opt/YuE")           # path to cloned repo
-            #   from models.yue import YuEPipeline
-            #   model = YuEPipeline.from_pretrained(model_path, device=device, dtype=torch_dtype)
-            #   processor = model.processor                # pipeline owns the processor
-            #
-            # ─────────────────────────────────────────────────────────────────
-            # ACTIVE INTEGRATION (update to match your installed package):
-            try:
-                from transformers import AutoModelForSeq2SeqLM, AutoProcessor
-
-                model = AutoModelForSeq2SeqLM.from_pretrained(
-                    model_path,
-                    torch_dtype=torch_dtype,
-                    low_cpu_mem_usage=True,
+            # ── Resolve model family ───────────────────────────────────────────
+            family_override = settings.yue_model_family
+            if family_override != ModelFamily.AUTO:
+                family = family_override.value
+                logger.info(
+                    "Model family override via YUE_MODEL_FAMILY: %s", family
                 )
-                model = model.to(device)
-                model.eval()
+            else:
+                family = detect_model_family(
+                    model_path,
+                    trust_remote_code=settings.yue_trust_remote_code,
+                )
+                if family == "unknown":
+                    raise RuntimeError(
+                        f"Cannot determine model family for checkpoint '{model_path}'. "
+                        f"The detected config class is not in any known architecture mapping. "
+                        f"Set YUE_MODEL_FAMILY=causal or YUE_MODEL_FAMILY=seq2seq to override."
+                    )
 
-                processor = AutoProcessor.from_pretrained(model_path)
+            logger.info("Resolved model family: %s", family)
 
-            except ImportError as exc:
-                raise RuntimeError(
-                    "transformers is not installed. Run: pip install transformers accelerate"
-                ) from exc
-            except OSError as exc:
-                raise RuntimeError(
-                    f"Could not load YuE checkpoint from '{model_path}'. "
-                    f"Check that YUE_MODEL_PATH points to a valid directory or HF repo id. "
-                    f"Original error: {exc}"
-                ) from exc
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Unexpected error loading YuE model: {exc}"
-                ) from exc
+            # ── Load weights ──────────────────────────────────────────────────
+            model, processor = load_model_and_processor(
+                model_path=model_path,
+                family=family,
+                device=device,
+                torch_dtype=torch_dtype,
+                trust_remote_code=settings.yue_trust_remote_code,
+            )
 
-            # ── Store references on state ──────────────────────────────────────
+            # ── Store references ──────────────────────────────────────────────
             self._model = model
             self._processor = processor
             self._device = device
             self._torch_dtype = torch_dtype
+            self._model_family = family
 
             elapsed = time.perf_counter() - t_start
 
-            # ── Update model metadata ──────────────────────────────────────────
             self.model.loaded = True
             self.model.stub_mode = False
+            self.model.model_family = family
             self.model.model_name = model_name
             self.model.loaded_at = datetime.utcnow()
             self.model.load_duration_sec = round(elapsed, 2)
 
-            # ── Refresh GPU telemetry ──────────────────────────────────────────
             self._refresh_gpu_telemetry()
 
             logger.info(
-                "YuE model ready | model=%s | device=%s | dtype=%s | load_time=%.1fs",
+                "YuE model ready | model=%s | family=%s | device=%s | dtype=%s | load_time=%.1fs",
                 model_name,
+                family,
                 device,
                 settings.yue_dtype,
                 elapsed,
@@ -249,7 +236,6 @@ class WorkerState:
     async def unload_model(self) -> None:
         """
         Release the YuE model from memory and clear the CUDA cache.
-
         Safe to call even if no model is loaded.
         """
         async with self.lock:
@@ -259,10 +245,6 @@ class WorkerState:
             model_name = self.model.model_name
             logger.info("Unloading model: %s", model_name)
 
-            # ── Release model references ──────────────────────────────────────
-            # Python will GC the model once all references are dropped.
-            # torch.cuda.empty_cache() then releases the freed VRAM back to the
-            # OS so it's available for the next model load.
             if self._model is not None:
                 del self._model
                 self._model = None
@@ -271,8 +253,8 @@ class WorkerState:
                 self._processor = None
             self._device = None
             self._torch_dtype = None
+            self._model_family = None
 
-            # ── Clear CUDA cache ──────────────────────────────────────────────
             try:
                 import torch
                 if torch.cuda.is_available():
@@ -280,11 +262,11 @@ class WorkerState:
                     torch.cuda.synchronize()
                     logger.info("CUDA cache cleared after unload")
             except ImportError:
-                pass  # torch not installed — stub mode
+                pass
 
-            # ── Reset state ────────────────────────────────────────────────────
             self.model.loaded = False
             self.model.stub_mode = False
+            self.model.model_family = None
             self.model.model_name = None
             self.model.loaded_at = None
             self.gpu.vram_used_gb = 0.0
@@ -294,7 +276,7 @@ class WorkerState:
     async def record_generation(self) -> None:
         """
         Update counters and refresh GPU telemetry after a completed generation.
-        Called by the /generate route after _run_inference() returns.
+        Called by the /generate route after inference returns.
         """
         async with self.lock:
             self.model.last_used_at = datetime.utcnow()
@@ -307,8 +289,6 @@ class WorkerState:
         """
         Update self.gpu with real VRAM usage and device info from torch.cuda.
         Falls back to zeroed-out values when CUDA is unavailable.
-
-        Called inside the lock from load_model() and record_generation().
         """
         try:
             import torch
@@ -320,17 +300,14 @@ class WorkerState:
                 self.gpu.vram_used_gb = round(
                     torch.cuda.memory_allocated(0) / 1e9, 2
                 )
-                # torch.cuda does not expose temperature directly.
-                # To get real temperatures, call nvidia-smi via subprocess:
+                # For real GPU temperatures, replace with:
                 #   result = subprocess.run(
                 #       ["nvidia-smi", "--query-gpu=temperature.gpu",
                 #        "--format=csv,noheader,nounits"],
-                #       capture_output=True, text=True
-                #   )
+                #       capture_output=True, text=True)
                 #   self.gpu.temperature_c = int(result.stdout.strip())
-                self.gpu.temperature_c = 0  # replace with nvidia-smi call above
+                self.gpu.temperature_c = 0
         except (ImportError, RuntimeError):
-            # CUDA not available or torch not installed
             self.gpu.available = False
             self.gpu.device = "cpu"
 

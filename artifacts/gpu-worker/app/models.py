@@ -29,6 +29,13 @@ class HealthResponse(BaseModel):
     version: str = Field(description="Worker API version.")
     model_loaded: bool = Field(description="Whether a model is currently loaded in memory.")
     model_name: Optional[str] = Field(None, description="Name of the currently loaded model, if any.")
+    model_family: Optional[str] = Field(
+        None,
+        description=(
+            "Resolved model architecture family: 'causal' (Llama-based, e.g. YuE-s1-7B) "
+            "or 'seq2seq' (encoder-decoder). Null when no model is loaded or in stub mode."
+        ),
+    )
     stub_mode: bool = Field(
         description=(
             "True when YUE_MODEL_PATH is not set and the worker is generating "

@@ -15,6 +15,18 @@ class AppEnv(str, Enum):
     PRODUCTION = "production"
 
 
+class ModelFamily(str, Enum):
+    AUTO = "auto"
+    CAUSAL = "causal"
+    SEQ2SEQ = "seq2seq"
+    PIPELINE = "pipeline"
+
+
+class GenerationBackend(str, Enum):
+    TRANSFORMERS = "transformers"
+    YUE_NATIVE = "yue_native"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -40,7 +52,7 @@ class Settings(BaseSettings):
 
     # ── YuE model configuration ───────────────────────────────────────────────
     # Local filesystem path (or HuggingFace repo id) to the YuE checkpoint.
-    # Example: /models/yue-s2-lyric  or  m-a-p/YuE-s2-lyric-audiovae-24k-v1.1
+    # Example: HKUSTAudio/YuE-s1-7B-anneal-en-icl
     # Leave blank to run in stub mode (silent WAV, no GPU required).
     yue_model_path: str = ""
 
@@ -56,7 +68,7 @@ class Settings(BaseSettings):
     yue_max_duration_sec: int = 300
 
     # Sample rate of the YuE audio output. Must match the checkpoint.
-    # YuE-s2-lyric uses 24000 Hz.
+    # YuE-s1-7B uses 24000 Hz.
     yue_sample_rate: int = 24000
 
     # Number of inference steps (higher = better quality, slower).
@@ -69,6 +81,23 @@ class Settings(BaseSettings):
     # Timeout for a single generation call in seconds.
     # Song-gen's REMOTE_WORKER_TIMEOUT_SEC should be set higher than this.
     generation_timeout_sec: int = 240
+
+    # ── Architecture / backend overrides ─────────────────────────────────────
+    # Set to true if the checkpoint requires custom code (e.g. HKUSTAudio/YuE).
+    # When AUTO, the worker will attempt to detect this from the model config.
+    yue_trust_remote_code: bool = False
+
+    # Force a specific model family instead of auto-detecting from config.
+    # auto   — detect from AutoConfig (recommended)
+    # causal — force AutoModelForCausalLM (Llama-based YuE checkpoints)
+    # seq2seq — force AutoModelForSeq2SeqLM
+    # pipeline — force pipeline() API
+    yue_model_family: ModelFamily = ModelFamily.AUTO
+
+    # Select which generation backend to use.
+    # transformers — use HuggingFace transformers generate() API
+    # yue_native   — use the YuE package's own pipeline (requires yue installed)
+    yue_generation_backend: GenerationBackend = GenerationBackend.TRANSFORMERS
 
 
 settings = Settings()

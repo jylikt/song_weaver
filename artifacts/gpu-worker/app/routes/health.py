@@ -31,6 +31,7 @@ async def health() -> HealthResponse:
         version="1.0.0",
         model_loaded=model.loaded,
         model_name=model.model_name,
+        model_family=model.model_family,
         stub_mode=model.stub_mode,
         loaded_at=model.loaded_at,
         load_duration_sec=model.load_duration_sec,
