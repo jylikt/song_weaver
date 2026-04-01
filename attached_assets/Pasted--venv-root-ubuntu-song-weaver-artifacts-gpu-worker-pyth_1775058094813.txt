@@ -1,0 +1,44 @@
+(.venv) root@ubuntu:~/song_weaver/artifacts/gpu-worker# python main.py
+INFO:     Will watch for changes in these directories: ['/root/song_weaver/artifacts/gpu-worker']
+INFO:     Uvicorn running on http://0.0.0.0:9000 (Press CTRL+C to quit)
+INFO:     Started reloader process [2774] using WatchFiles
+INFO:     Started server process [2776]
+INFO:     Waiting for application startup.
+2026-04-01 15:39:49,843 [INFO] app.main — GPU Worker started | env=production | default_model=yue-base | yue_path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | auth=enabled
+INFO:     Application startup complete.
+INFO:     127.0.0.1:56486 - "GET /health HTTP/1.1" 200 OK
+2026-04-01 15:39:56,317 [INFO] app.state — Loading YuE model | path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | trust_remote_code=False
+2026-04-01 15:39:57,760 [INFO] app.yue_adapter — Detecting model architecture | path=/root/YuE-s1-7B-anneal-en-icl
+2026-04-01 15:39:57,762 [INFO] app.yue_adapter — Detected config class: LlamaConfig
+2026-04-01 15:39:57,762 [INFO] app.yue_adapter — Resolved model family: causal (Llama/decoder-only path)
+2026-04-01 15:39:57,762 [INFO] app.state — Resolved model family: causal
+2026-04-01 15:39:57,778 [INFO] app.yue_adapter — Loading causal LM (AutoModelForCausalLM) | path=/root/YuE-s1-7B-anneal-en-icl
+Loading checkpoint shards: 100%|██████████████████████████████████████████████████████████| 3/3 [00:01<00:00,  2.28it/s]
+You are using the default legacy behaviour of the <class 'transformers.models.llama.tokenization_llama.LlamaTokenizer'>. This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it means, and thoroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565 - if you loaded a llama tokenizer from a GGUF file you can ignore this message
+You are using the default legacy behaviour of the <class 'transformers.models.llama.tokenization_llama_fast.LlamaTokenizerFast'>. This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it means, and thoroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565 - if you loaded a llama tokenizer from a GGUF file you can ignore this message.
+2026-04-01 15:40:02,121 [INFO] app.yue_adapter — Causal model + tokenizer loaded successfully
+2026-04-01 15:40:02,121 [INFO] app.state — YuE model ready | model=yue-base | family=causal | device=cuda | dtype=fp16 | load_time=5.8s
+INFO:     127.0.0.1:56486 - "POST /load-model HTTP/1.1" 200 OK
+2026-04-01 15:40:02,408 [INFO] app.routes.generate — Generation start | job=b30e61e2-0388-4923-8a54-af73fc398a86 | model=yue-base | family=causal | stub=False | style=hip_hop | duration=30s | seed=None
+2026-04-01 15:40:02,409 [ERROR] app.routes.generate — Inference failed | job=b30e61e2-0388-4923-8a54-af73fc398a86 | error=Asking to pad but the tokenizer does not have a padding token. Please select a token to use as `pad_token` `(tokenizer.pad_token = tokenizer.eos_token e.g.)` or add a new pad token via `tokenizer.add_special_tokens({'pad_token': '[PAD]'})`.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/app/routes/generate.py", line 105, in generate
+    await loop.run_in_executor(
+  File "/usr/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/root/song_weaver/artifacts/gpu-worker/app/routes/generate.py", line 182, in _run_inference
+    run_yue_inference(
+  File "/root/song_weaver/artifacts/gpu-worker/app/yue_adapter.py", line 231, in run_yue_inference
+    _run_causal_inference(
+  File "/root/song_weaver/artifacts/gpu-worker/app/yue_adapter.py", line 297, in _run_causal_inference
+    inputs = tokenizer(
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/tokenization_utils_base.py", line 3055, in __call__
+    encodings = self._call_one(text=text, text_pair=text_pair, **all_kwargs)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/tokenization_utils_base.py", line 3163, in _call_one
+    return self.encode_plus(
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/tokenization_utils_base.py", line 3228, in encode_plus
+    padding_strategy, truncation_strategy, max_length, kwargs = self._get_padding_truncation_strategies(
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/transformers/tokenization_utils_base.py", line 2959, in _get_padding_truncation_strategies
+    raise ValueError(
+ValueError: Asking to pad but the tokenizer does not have a padding token. Please select a token to use as `pad_token` `(tokenizer.pad_token = tokenizer.eos_token e.g.)` or add a new pad token via `tokenizer.add_special_tokens({'pad_token': '[PAD]'})`.
+INFO:     127.0.0.1:56486 - "POST /generate HTTP/1.1" 500 Internal Server Error
