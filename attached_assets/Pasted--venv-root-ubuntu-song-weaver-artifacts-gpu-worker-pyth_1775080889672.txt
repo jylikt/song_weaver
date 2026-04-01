@@ -1,0 +1,92 @@
+(.venv) root@ubuntu:~/song_weaver/artifacts/gpu-worker# python main.py
+INFO:     Will watch for changes in these directories: ['/root/song_weaver/artifacts/gpu-worker']
+INFO:     Uvicorn running on http://0.0.0.0:9000 (Press CTRL+C to quit)
+INFO:     Started reloader process [4753] using WatchFiles
+INFO:     Started server process [4755]
+INFO:     Waiting for application startup.
+2026-04-01 22:00:46,425 [INFO] app.main — GPU Worker started | env=production | default_model=yue-base | yue_path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | auth=enabled
+INFO:     Application startup complete.
+INFO:     127.0.0.1:34998 - "GET /health HTTP/1.1" 200 OK
+2026-04-01 22:00:50,976 [INFO] app.state — Loading YuE model | path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | trust_remote_code=False
+2026-04-01 22:00:52,659 [INFO] app.yue_adapter — Detecting model architecture | path=/root/YuE-s1-7B-anneal-en-icl
+2026-04-01 22:00:52,693 [INFO] app.yue_adapter — Detected config class: LlamaConfig
+2026-04-01 22:00:52,693 [INFO] app.yue_adapter — Resolved model family: causal (Llama/decoder-only path)
+2026-04-01 22:00:52,693 [INFO] app.state — Resolved model family: causal
+2026-04-01 22:00:53,448 [INFO] app.yue_adapter — Loading causal LM (AutoModelForCausalLM) | path=/root/YuE-s1-7B-anneal-en-icl
+Loading weights: 100%|███████████████████████████████████████████████████████████████| 291/291 [00:00<00:00, 291.95it/s]
+2026-04-01 22:00:56,658 [INFO] app.yue_adapter — Causal model + tokenizer loaded successfully
+2026-04-01 22:00:56,659 [INFO] app.yue_adapter — Loading xcodec2 codec | path=/root/xcodec2 | device=cuda
+2026-04-01 22:00:56,670 [DEBUG] torio._extension.utils — Loading FFmpeg6
+2026-04-01 22:00:56,671 [DEBUG] torio._extension.utils — Failed to load FFmpeg6 extension.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torch/_ops.py", line 1350, in load_library
+    ctypes.CDLL(path)
+  File "/usr/lib/python3.10/ctypes/__init__.py", line 374, in __init__
+    self._handle = _dlopen(self._name, mode)
+OSError: libavutil.so.58: cannot open shared object file: No such file or directory
+2026-04-01 22:00:56,673 [DEBUG] torio._extension.utils — Loading FFmpeg5
+2026-04-01 22:00:56,673 [DEBUG] torio._extension.utils — Failed to load FFmpeg5 extension.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torch/_ops.py", line 1350, in load_library
+    ctypes.CDLL(path)
+  File "/usr/lib/python3.10/ctypes/__init__.py", line 374, in __init__
+    self._handle = _dlopen(self._name, mode)
+OSError: libavutil.so.57: cannot open shared object file: No such file or directory
+2026-04-01 22:00:56,673 [DEBUG] torio._extension.utils — Loading FFmpeg4
+2026-04-01 22:00:56,673 [DEBUG] torio._extension.utils — Failed to load FFmpeg4 extension.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torch/_ops.py", line 1350, in load_library
+    ctypes.CDLL(path)
+  File "/usr/lib/python3.10/ctypes/__init__.py", line 374, in __init__
+    self._handle = _dlopen(self._name, mode)
+OSError: libavutil.so.56: cannot open shared object file: No such file or directory
+2026-04-01 22:00:56,674 [DEBUG] torio._extension.utils — Loading FFmpeg
+2026-04-01 22:00:56,674 [DEBUG] torio._extension.utils — Failed to load FFmpeg extension.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 106, in _find_versionsed_ffmpeg_extension
+    raise RuntimeError(f"FFmpeg{version} extension is not available.")
+RuntimeError: FFmpeg extension is not available.
+2026-04-01 22:00:56,819 [INFO] root — lm_eval is not installed, GPTQ may not be usable
+2026-04-01 22:00:57,699 [DEBUG] datasets — PyTorch version 2.5.0 available.
+You are using a model of type `xcodec2` to instantiate a model of type `bigcodec`. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-04-01 22:00:57,972 [DEBUG] app.yue_adapter — Direct import failed: You are using `from_pretrained` with a meta device context manager or `torch.set_default_device('meta')`.
+This is an anti-pattern as `from_pretrained` wants to load existing weights.
+If you want to initialize an empty model on the meta device, use the context manager or global device with `from_config`, or `ModelClass(config)` — trying next strategy.
+You are using a model of type `xcodec2` to instantiate a model of type `xcodec`. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-04-01 22:00:58,089 [DEBUG] app.yue_adapter — xcodec2 package load failed: You are using `from_pretrained` with a meta device context manager or `torch.set_default_device('meta')`.
+This is an anti-pattern as `from_pretrained` wants to load existing weights.
+If you want to initialize an empty model on the meta device, use the context manager or global device with `from_config`, or `ModelClass(config)` — trying next strategy.
+2026-04-01 22:00:58,089 [ERROR] app.yue_adapter — Failed to load xcodec2 codec from '/root/xcodec2': The checkpoint you are trying to load has model type `xcodec2` but Transformers does not recognize this architecture. This could be because of an issue with the checkpoint, or because your version of Transformers is out of date.
+
+You can update Transformers with the command `pip install --upgrade transformers`. If this does not work, and the checkpoint is very new, then there may not be a release version that supports this model yet. In this case, you can get the most up-to-date code by installing Transformers from source with the command `pip install git+https://github.com/huggingface/transformers.git`
+Generations will fall back to silent WAV.
+Fix options:
+  • Set YUE_CODEC_PATH to a local directory with pre-downloaded codec weights.
+  • If the repo is gated, set YUE_HF_TOKEN to your HuggingFace token.
+  • Run: pip install xcodec2  (if the xcodec2 package is available).
+  • Set YUE_REPO_PATH to a cloned HKUSTAudio/YuE repo for native inference.
+2026-04-01 22:00:58,089 [INFO] app.state — YuE model ready | model=yue-base | family=causal | device=cuda | dtype=fp16 | load_time=7.1s
+INFO:     127.0.0.1:34998 - "POST /load-model HTTP/1.1" 200 OK
+2026-04-01 22:00:58,099 [INFO] app.routes.generate — Generation start | job=47c965da-babd-4d5e-8db3-be33f888b7fe | model=yue-base | family=causal | stub=False | style=pop | duration=15s | seed=None
+2026-04-01 22:00:58,099 [INFO] app.yue_adapter — Causal inference start | job=47c965da-babd-4d5e-8db3-be33f888b7fe | prompt_chars=617 | duration=15s | codec_loaded=False | text_vocab_size=32000
+2026-04-01 22:00:58,102 [INFO] app.yue_adapter — Token budget | prompt=201 | max_new=9000 | ctx_limit=16384 | ideal=9000

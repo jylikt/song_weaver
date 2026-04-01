@@ -207,6 +207,13 @@ class WorkerState:
                 trust_remote_code=settings.yue_trust_remote_code,
             )
 
+            # ── Reset meta-device leak from LLM loading ───────────────────────
+            # from_pretrained with low_cpu_mem_usage=True leaves
+            # torch.set_default_device('meta') set globally on some accelerate
+            # versions. Reset it now so the codec loading is not affected.
+            from app.yue_adapter import _reset_default_device
+            _reset_default_device()
+
             # ── Store references ──────────────────────────────────────────────
             self._model = model
             self._processor = processor

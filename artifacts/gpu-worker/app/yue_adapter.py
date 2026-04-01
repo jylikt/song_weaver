@@ -205,82 +205,104 @@ def load_codec(
     logger.info("Loading xcodec2 codec | path=%s | device=%s", codec_path, device)
     token = hf_token or None
 
+    # ── Reset meta-device global state ────────────────────────────────────────
+    # AutoModelForCausalLM.from_pretrained(..., low_cpu_mem_usage=True) uses
+    # accelerate's init_empty_weights() which calls torch.set_default_device('meta').
+    # On some accelerate versions this global state is NOT restored after the
+    # context exits, causing every subsequent from_pretrained() call to fail with
+    # "from_pretrained with a meta device context manager".
+    # Explicitly resetting it here makes codec loading immune to that leak.
+    _reset_default_device()
+
     last_exc: Optional[Exception] = None
 
-    # ── Strategy 1: direct local import (avoids AutoModel meta-device bug) ───
+    # ── Strategy 1: manual weight loading — never calls from_pretrained ───────
+    # This is the primary strategy for local codec directories.  It loads the
+    # model class from modeling_xcodec2.py, instantiates it from config, then
+    # loads weights directly from .safetensors / .bin files.  Because
+    # from_pretrained is never called, the meta-device global state is irrelevant.
     if os.path.isdir(codec_path):
         try:
-            codec = _load_codec_direct_import(codec_path, device, token)
-            logger.info("xcodec2 loaded via direct import | device=%s", device)
+            codec = _load_codec_manual_weights(codec_path, device)
+            logger.info("xcodec2 loaded via manual weights | device=%s", device)
             return codec
         except Exception as exc:
-            logger.debug("Direct import failed: %s — trying next strategy.", exc)
+            logger.debug("Manual weight load failed: %s — trying next strategy.", exc)
             last_exc = exc
 
-    # ── Strategy 2: xcodec2 pip package ──────────────────────────────────────
-    try:
-        from xcodec2.modeling_xcodec2 import XCodec2Model  # type: ignore[import]
-        codec = XCodec2Model.from_pretrained(codec_path, token=token)
-        codec = codec.to(device).eval()
-        logger.info("xcodec2 loaded via xcodec2 pip package | device=%s", device)
-        return codec
-    except ImportError:
-        pass
-    except Exception as exc:
-        logger.debug("xcodec2 package load failed: %s — trying next strategy.", exc)
-        last_exc = exc
-
-    # ── Strategy 3: AutoModel with forced CPU device_map ─────────────────────
-    try:
-        import torch
-        from transformers import AutoModel
-        codec = AutoModel.from_pretrained(
-            codec_path,
-            trust_remote_code=True,
-            token=token,
-            torch_dtype=torch.float32,
-            device_map={"": "cpu"},   # prevents meta-device initialization
-        )
-        codec = codec.to(device).eval()
-        logger.info("xcodec2 loaded via AutoModel CPU fallback | device=%s", device)
-        return codec
-    except Exception as exc:
-        last_exc = exc
+    # ── Strategy 2: from_pretrained after device reset ────────────────────────
+    # The meta-device reset above makes from_pretrained safe to call again.
+    # Try the xcodec2 pip package first (cleanest), then AutoModel fallback.
+    for attempt_label, loader in [
+        ("xcodec2-pkg",   lambda: _try_xcodec2_pkg(codec_path, token)),
+        ("AutoModel-cpu", lambda: _try_automodel_cpu(codec_path, token)),
+    ]:
+        try:
+            codec = loader()
+            codec = codec.to(device).eval()
+            logger.info("xcodec2 loaded via %s | device=%s", attempt_label, device)
+            return codec
+        except Exception as exc:
+            logger.debug("%s load failed: %s — trying next strategy.", attempt_label, exc)
+            last_exc = exc
 
     logger.error(
         "Failed to load xcodec2 codec from '%s': %s\n"
         "Generations will fall back to silent WAV.\n"
         "Fix options:\n"
-        "  • Set YUE_CODEC_PATH to a local directory with pre-downloaded codec weights.\n"
-        "  • If the repo is gated, set YUE_HF_TOKEN to your HuggingFace token.\n"
-        "  • Run: pip install xcodec2  (if the xcodec2 package is available).\n"
+        "  • Ensure /root/xcodec2 contains modeling_xcodec2.py + weight files.\n"
+        "  • Run: pip install xcodec2  (official package, recommended).\n"
         "  • Set YUE_REPO_PATH to a cloned HKUSTAudio/YuE repo for native inference.",
         codec_path, last_exc,
     )
     return None
 
 
-def _load_codec_direct_import(codec_path: str, device: Any, token: Optional[str]) -> Any:
-    """
-    Load xcodec2 by injecting its directory onto sys.path and importing
-    the model class directly, bypassing AutoModel's type-mapping logic
-    that triggers the meta-device anti-pattern.
+# ─── Codec loading helpers ────────────────────────────────────────────────────
 
-    Looks for (in order):
-      modeling_xcodec2.py   → XCodec2Model
-      modeling_xcodec.py    → XCodec2Model or first PreTrainedModel subclass
+def _reset_default_device() -> None:
+    """
+    Clear any global torch default device left by prior model loading.
+
+    accelerate's init_empty_weights() (used by from_pretrained with
+    low_cpu_mem_usage=True) sets torch.set_default_device('meta').  On some
+    accelerate versions the cleanup after the context exits does not fully
+    restore the global state, causing all subsequent from_pretrained() calls
+    to fail.  This function resets it to a safe state.
+    """
+    import torch
+    try:
+        torch.set_default_device(None)
+        logger.debug("Reset torch default device to None.")
+    except (AttributeError, TypeError):
+        pass  # PyTorch < 2.0 does not have set_default_device
+
+
+def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
+    """
+    Load xcodec2 without calling from_pretrained.
+
+    Steps:
+      1. sys.path injection — import model class from modeling_xcodec2.py.
+      2. Load config via AutoConfig.from_pretrained (reads JSON only, safe).
+      3. Instantiate model_cls(config) on CPU — no meta device involved.
+      4. Load weights from .safetensors or pytorch_model.bin manually.
+      5. load_state_dict + move to target device.
     """
     import sys
-    import inspect
+    import torch
+    from pathlib import Path as _Path
 
     codec_dir = os.path.abspath(codec_path)
+    codec_dir_path = _Path(codec_dir)
+
     inserted = codec_dir not in sys.path
     if inserted:
         sys.path.insert(0, codec_dir)
 
     try:
+        # Step 1 — find model class
         model_cls = None
-
         for module_name, class_names in [
             ("modeling_xcodec2", ["XCodec2Model"]),
             ("modeling_xcodec",  ["XCodec2Model", "XCodecModel"]),
@@ -302,13 +324,77 @@ def _load_codec_direct_import(codec_path: str, device: Any, token: Optional[str]
                 f"Expected modeling_xcodec2.py with XCodec2Model."
             )
 
-        codec = model_cls.from_pretrained(codec_path, token=token)
-        codec = codec.to(device).eval()
-        return codec
+        # Step 2 — load config (JSON-only, no weights, no meta device)
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(codec_dir, trust_remote_code=True)
+
+        # Step 3 — instantiate on CPU
+        with torch.device("cpu"):
+            model = model_cls(config)
+
+        # Step 4 — find weight files
+        state_dict: dict = {}
+        sf_files = sorted(codec_dir_path.glob("model*.safetensors"))
+        if not sf_files:
+            sf_files = sorted(codec_dir_path.glob("*.safetensors"))
+
+        bin_files = sorted(codec_dir_path.glob("pytorch_model*.bin"))
+        if not bin_files:
+            bin_files = sorted(codec_dir_path.glob("*.bin"))
+
+        if sf_files:
+            try:
+                from safetensors.torch import load_file as _sf_load
+                for sf in sf_files:
+                    state_dict.update(_sf_load(str(sf), device="cpu"))
+                logger.debug("Loaded %d safetensors weight files.", len(sf_files))
+            except ImportError:
+                logger.debug("safetensors not installed — falling back to .bin files.")
+                sf_files = []
+
+        if not state_dict and bin_files:
+            for bf in bin_files:
+                state_dict.update(
+                    torch.load(str(bf), map_location="cpu", weights_only=True)
+                )
+            logger.debug("Loaded %d .bin weight files.", len(bin_files))
+
+        if not state_dict:
+            raise FileNotFoundError(
+                f"No .safetensors or .bin weight files found in {codec_dir}. "
+                f"Check that the codec was downloaded completely."
+            )
+
+        # Step 5 — load state dict and move to device
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            logger.debug("Missing keys in codec state_dict: %s", missing[:5])
+        if unexpected:
+            logger.debug("Unexpected keys in codec state_dict: %s", unexpected[:5])
+
+        model = model.to(device).eval()
+        return model
 
     finally:
         if inserted and codec_dir in sys.path:
             sys.path.remove(codec_dir)
+
+
+def _try_xcodec2_pkg(codec_path: str, token: Optional[str]) -> Any:
+    from xcodec2.modeling_xcodec2 import XCodec2Model  # type: ignore[import]
+    return XCodec2Model.from_pretrained(codec_path, token=token)
+
+
+def _try_automodel_cpu(codec_path: str, token: Optional[str]) -> Any:
+    import torch
+    from transformers import AutoModel
+    return AutoModel.from_pretrained(
+        codec_path,
+        trust_remote_code=True,
+        token=token,
+        torch_dtype=torch.float32,
+        device_map={"": "cpu"},
+    )
 
 
 # ─── Public inference entry-point ─────────────────────────────────────────────
