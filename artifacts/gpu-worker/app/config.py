@@ -83,19 +83,42 @@ class Settings(BaseSettings):
     generation_timeout_sec: int = 240
 
     # ── Codec configuration ───────────────────────────────────────────────────
-    # XCodec2 model used to decode the audio codec tokens produced by the LLM.
-    # HKUSTAudio/YuE uses m-a-p/xcodec2. Set to a local path if already
-    # downloaded, or leave as the HF repo id to download on first use.
-    # Set to empty string to disable codec loading (generation will fall back
-    # to a silent WAV with a clear error in the logs).
+    # XCodec2 codec — decodes audio codec tokens produced by the YuE LLM.
+    # Priority: local path > HF repo id.
+    # Examples:
+    #   /root/xcodec2          (pre-downloaded local directory)
+    #   m-a-p/xcodec2          (HuggingFace repo, requires internet + optional HF_TOKEN)
+    # Leave empty to skip codec loading (generations fall back to silent WAV).
     yue_codec_path: str = "m-a-p/xcodec2"
+
+    # HuggingFace token for gated/private model repos (codec or LLM).
+    # Set via HF_TOKEN env var or here. Leave blank for public repos.
+    yue_hf_token: str = ""
 
     # Number of RVQ codebooks in the codec (8 for standard xcodec2).
     yue_codec_n_codebooks: int = 8
 
+    # ── Audio token extraction ────────────────────────────────────────────────
+    # YuE extends the Llama-2 vocabulary with audio codec tokens.
+    # Text tokens occupy IDs [0, yue_text_vocab_size).
+    # Audio codec tokens occupy IDs [yue_text_vocab_size, full_vocab_size).
+    #
+    # IMPORTANT: tokenizer.vocab_size returns the FULL extended vocabulary
+    # (e.g. 83734) which includes audio tokens — do NOT use it as this threshold.
+    # The correct value is the original Llama-2 text vocabulary size: 32000.
+    yue_text_vocab_size: int = 32000
+
+    # ── Native YuE subprocess inference ──────────────────────────────────────
+    # Set to the path of a cloned HKUSTAudio/YuE GitHub repository.
+    # When set, the worker calls infer.py from the repo as a subprocess instead
+    # of the built-in transformers path. This is the most accurate and fastest
+    # inference method as it uses the official YuE pipeline directly.
+    # Example: /root/YuE
+    # Leave blank to use the built-in transformers inference path.
+    yue_repo_path: str = ""
+
     # ── Architecture / backend overrides ─────────────────────────────────────
     # Set to true if the checkpoint requires custom code (e.g. HKUSTAudio/YuE).
-    # When AUTO, the worker will attempt to detect this from the model config.
     yue_trust_remote_code: bool = False
 
     # Force a specific model family instead of auto-detecting from config.

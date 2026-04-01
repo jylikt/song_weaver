@@ -221,6 +221,7 @@ class WorkerState:
                 self._codec = load_codec(
                     codec_path=settings.yue_codec_path,
                     device=device,
+                    hf_token=settings.yue_hf_token,
                 )
             else:
                 self._codec = None

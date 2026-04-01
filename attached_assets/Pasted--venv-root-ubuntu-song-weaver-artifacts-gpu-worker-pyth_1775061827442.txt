@@ -1,0 +1,43 @@
+(.venv) root@ubuntu:~/song_weaver/artifacts/gpu-worker# python main.py
+INFO:     Will watch for changes in these directories: ['/root/song_weaver/artifacts/gpu-worker']
+INFO:     Uvicorn running on http://0.0.0.0:9000 (Press CTRL+C to quit)
+INFO:     Started reloader process [3023] using WatchFiles
+INFO:     Started server process [3025]
+INFO:     Waiting for application startup.
+2026-04-01 15:55:25,337 [INFO] app.main — GPU Worker started | env=production | default_model=yue-base | yue_path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | auth=enabled
+INFO:     Application startup complete.
+INFO:     127.0.0.1:44096 - "GET /health HTTP/1.1" 200 OK
+2026-04-01 15:55:33,707 [INFO] app.state — Loading YuE model | path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | trust_remote_code=False
+2026-04-01 15:55:33,799 [INFO] watchfiles.main — 3 changes detected
+2026-04-01 15:55:35,145 [INFO] app.yue_adapter — Detecting model architecture | path=/root/YuE-s1-7B-anneal-en-icl
+2026-04-01 15:55:35,147 [INFO] app.yue_adapter — Detected config class: LlamaConfig
+2026-04-01 15:55:35,147 [INFO] app.yue_adapter — Resolved model family: causal (Llama/decoder-only path)
+2026-04-01 15:55:35,147 [INFO] app.state — Resolved model family: causal
+2026-04-01 15:55:35,163 [INFO] app.yue_adapter — Loading causal LM (AutoModelForCausalLM) | path=/root/YuE-s1-7B-anneal-en-icl
+Loading checkpoint shards: 100%|██████████████████████████████████████████████████████████| 3/3 [00:01<00:00,  2.32it/s]
+You are using the default legacy behaviour of the <class 'transformers.models.llama.tokenization_llama.LlamaTokenizer'>. This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it means, and thoroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565 - if you loaded a llama tokenizer from a GGUF file you can ignore this message
+You are using the default legacy behaviour of the <class 'transformers.models.llama.tokenization_llama_fast.LlamaTokenizerFast'>. This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it means, and thoroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565 - if you loaded a llama tokenizer from a GGUF file you can ignore this message.
+2026-04-01 15:55:39,457 [INFO] app.yue_adapter — Causal model + tokenizer loaded successfully
+2026-04-01 15:55:39,457 [INFO] app.yue_adapter — Loading xcodec2 codec | path=m-a-p/xcodec2 | device=cuda
+2026-04-01 15:55:39,872 [ERROR] app.yue_adapter — Failed to load xcodec2 codec from 'm-a-p/xcodec2': m-a-p/xcodec2 is not a local folder and is not a valid model identifier listed on 'https://huggingface.co/models'
+If this is a private repository, make sure to pass a token having permission to this repo either by logging in with `huggingface-cli login` or by passing `token=<your_token>`. Generations will fall back to silent WAV. Fix: ensure the codec path is correct and the model files are present.
+2026-04-01 15:55:39,873 [INFO] app.state — YuE model ready | model=yue-base | family=causal | device=cuda | dtype=fp16 | load_time=6.2s
+INFO:     127.0.0.1:44096 - "POST /load-model HTTP/1.1" 200 OK
+2026-04-01 15:55:40,161 [INFO] app.routes.generate — Generation start | job=0f1ccfbb-5ca9-4576-8eee-40a07cca3177 | model=yue-base | family=causal | stub=False | style=hip_hop | duration=30s | seed=None
+2026-04-01 15:55:40,162 [INFO] app.yue_adapter — Causal inference start | job=0f1ccfbb-5ca9-4576-8eee-40a07cca3177 | prompt_chars=609 | duration=30s | codec_loaded=False
+2026-04-01 15:55:40,169 [INFO] app.yue_adapter — Generating 18000 tokens (30 s × 75 fps × 8 codebooks)
+This is a friendly reminder - the current text generation call will exceed the model's predefined maximum length (16384). Depending on the model, you may observe exceptions, performance degradation, or nothing at all.
+2026-04-01 16:09:53,494 [INFO] app.yue_adapter — Token extraction | total_generated=18000 | audio_tokens=0 | text_vocab_size=83734
+2026-04-01 16:09:53,495 [ERROR] app.routes.generate — Inference failed | job=0f1ccfbb-5ca9-4576-8eee-40a07cca3177 | error=No audio codec tokens found in model output (all 18000 tokens are below text_vocab_size=83734). The prompt format or model checkpoint may be incompatible.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/app/routes/generate.py", line 105, in generate
+    await loop.run_in_executor(
+  File "/usr/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/root/song_weaver/artifacts/gpu-worker/app/routes/generate.py", line 182, in _run_inference
+    run_yue_inference(
+  File "/root/song_weaver/artifacts/gpu-worker/app/yue_adapter.py", line 239, in run_yue_inference
+    _run_causal_inference(
+  File "/root/song_weaver/artifacts/gpu-worker/app/yue_adapter.py", line 356, in _run_causal_inference
+    raise RuntimeError(
+RuntimeError: No audio codec tokens found in model output (all 18000 tokens are below text_vocab_size=83734). The prompt format or model checkpoint may be incompatible.

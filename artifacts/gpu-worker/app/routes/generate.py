@@ -188,9 +188,12 @@ def _run_inference(
         family=model_family,
         codec=worker_state._codec,
         n_codebooks=settings.yue_codec_n_codebooks,
+        text_vocab_size=settings.yue_text_vocab_size,
         sample_rate=settings.yue_sample_rate,
         cfg_scale=settings.yue_cfg_scale,
         num_steps=settings.yue_num_steps,
+        yue_repo_path=settings.yue_repo_path,
+        yue_model_path=settings.yue_model_path,
     )
 
 

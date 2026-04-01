@@ -48,7 +48,9 @@ class Settings(BaseSettings):
     remote_worker_token: str = ""
 
     # Seconds to wait for the worker to respond before giving up.
-    remote_worker_timeout_sec: int = 300
+    # YuE generation at 30 s of audio can take 10–20 minutes on GPU;
+    # set this higher than your longest expected generation.
+    remote_worker_timeout_sec: int = 1800
 
 
 # Single shared settings instance used across the application
