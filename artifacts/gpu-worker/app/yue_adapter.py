@@ -222,12 +222,25 @@ def load_codec(
 
     last_exc: Optional[Exception] = None
 
-    # ── Strategy 1: manual weight loading for local directories ───────────────
-    # Scans the codec dir for known module files (model.py, modeling_xcodec.py,
-    # modeling_xcodec2.py) and extracts the model class, then loads weights
-    # directly.  Never calls AutoConfig, so architecture-not-found errors are
-    # fully avoided.  Preferred for local checkpoints of any xcodec variant.
+    # ── Strategy 1: local directory loaders ───────────────────────────────────
     if os.path.isdir(codec_path):
+
+        # 1a — Original m-a-p/xcodec research repo layout:
+        #      models/soundstream_hubert_new.py + final_ckpt/config.yaml + ckpt_*.pth
+        #      FileNotFoundError is raised (not logged) when layout doesn't match,
+        #      so we silently skip to 1b.
+        try:
+            codec = _try_xcodec_local_repo(codec_path, device)
+            logger.info("Audio codec loaded via xcodec repo loader | device=%s", device)
+            return codec
+        except FileNotFoundError:
+            pass  # not an xcodec repo dir — try HF-style next
+        except Exception as exc:
+            logger.debug("xcodec repo load failed: %s — trying next strategy.", exc)
+            last_exc = exc
+
+        # 1b — HF-style directory: model.py / modeling_xcodec*.py + safetensors/bin weights.
+        #      Used for m-a-p/xcodec_mini_infer and HKUSTAudio/xcodec2 local snapshots.
         try:
             codec = _load_codec_manual_weights(codec_path, device)
             logger.info("Audio codec loaded via manual weights | device=%s", device)
@@ -527,6 +540,213 @@ def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
             logger.debug("Unexpected keys in codec state_dict: %s", unexpected[:5])
 
         return model.to(device).eval()
+
+    finally:
+        if inserted and codec_dir in sys.path:
+            sys.path.remove(codec_dir)
+
+
+class _XCodecRepoWrapper:
+    """
+    Thin wrapper around the original m-a-p/xcodec SoundStream model.
+
+    Exposes the standard decode_code(codes) interface expected by
+    _decode_with_codec(), plus to() / eval() so load_codec() can move
+    and freeze it like any other model.
+
+    codec.decode_code(codes) tries:
+      1. model.decode(codes)                         — combined decode
+      2. model.quantizer.from_codes(codes) → decoder — two-step
+      3. model.quantizer.decode(codes) → decoder     — alt two-step API
+    """
+
+    def __init__(self, model: Any) -> None:
+        self._model = model
+
+    # ── Primary interface ──────────────────────────────────────────────────
+
+    def decode_code(self, codes: Any) -> Any:
+        """
+        Decode VQ codes (batch, n_q, time) to waveform.
+
+        SoundStream.decode() takes continuous embeddings, NOT integer codes, so the
+        correct pipeline is two-step: dequantize → decode.  Direct decode(codes) is
+        tried last as a fallback for models that combine both steps.
+        """
+        import torch
+        with torch.no_grad():
+            # ── Step 1 (primary): dequantize then decode ───────────────────
+            # SoundStream architecture: codes → quantizer.from_codes → embeddings
+            # → decoder/decode → waveform
+            quant = getattr(self._model, "quantizer", None)
+            dec_fn = (
+                getattr(self._model, "decoder", None)
+                or getattr(self._model, "decode", None)
+            )
+            if quant is not None and dec_fn is not None:
+                for dequant_name in ("from_codes", "decode", "get_output_from_indices"):
+                    dequant_fn = getattr(quant, dequant_name, None)
+                    if dequant_fn is None:
+                        continue
+                    try:
+                        emb = dequant_fn(codes)
+                        # dec_fn may be a nn.Module (decoder) or a method (decode)
+                        out = dec_fn(emb) if callable(dec_fn) else dec_fn
+                        if isinstance(out, (tuple, list)):
+                            return out[0]
+                        return out
+                    except Exception as e:
+                        logger.debug(
+                            "Two-step decode via quantizer.%s failed: %s",
+                            dequant_name, e,
+                        )
+                        continue
+
+            # ── Step 2 (fallback): model.decode(codes) ────────────────────
+            # For models that combine quantization + decoding in one call.
+            if hasattr(self._model, "decode"):
+                try:
+                    out = self._model.decode(codes)
+                    if isinstance(out, (tuple, list)):
+                        return out[0]
+                    return out
+                except Exception as e:
+                    logger.debug("SoundStream.decode(codes) failed: %s", e)
+
+        raise RuntimeError(
+            "SoundStream model does not expose a usable decode API. "
+            "Expected model.quantizer.from_codes + model.decoder, "
+            "or a combined model.decode(codes)."
+        )
+
+    # ── Torch-compatible helpers ───────────────────────────────────────────
+
+    def to(self, device: Any) -> "_XCodecRepoWrapper":
+        self._model = self._model.to(device)
+        return self
+
+    def eval(self) -> "_XCodecRepoWrapper":
+        self._model.eval()
+        return self
+
+    def __getattr__(self, name: str) -> Any:
+        # Transparent attribute delegation for quantizer/generator inspection
+        return getattr(self._model, name)
+
+
+def _try_xcodec_local_repo(codec_path: str, device: Any) -> "_XCodecRepoWrapper":
+    """
+    Load the original m-a-p/xcodec from its research repository directory.
+
+    Expected layout:
+        models/soundstream_hubert_new.py — SoundStream model class
+        final_ckpt/config.yaml          — YAML model config
+        final_ckpt/ckpt_*.pth           — model checkpoint (.pth)
+        quantization/, modules/, utils/ — imports resolved via sys.path
+
+    Raises FileNotFoundError when the directory does not match this layout
+    so callers can skip it and try other strategies without logging an error.
+    """
+    import sys
+    import torch
+    from pathlib import Path as _Path
+
+    codec_dir = os.path.abspath(codec_path)
+    codec_dir_path = _Path(codec_dir)
+
+    # ── Layout detection ───────────────────────────────────────────────────
+    model_file = codec_dir_path / "models" / "soundstream_hubert_new.py"
+    ckpt_dir = codec_dir_path / "final_ckpt"
+    if not model_file.exists():
+        raise FileNotFoundError(
+            f"Not an xcodec repo dir (missing models/soundstream_hubert_new.py): {codec_dir}"
+        )
+    if not ckpt_dir.exists():
+        raise FileNotFoundError(
+            f"Not an xcodec repo dir (missing final_ckpt/): {codec_dir}"
+        )
+
+    # ── Checkpoint discovery ───────────────────────────────────────────────
+    # Pick the lexicographically largest ckpt (highest step count).
+    pth_files = sorted(ckpt_dir.glob("ckpt_*.pth"))
+    if not pth_files:
+        pth_files = sorted(ckpt_dir.glob("*.pth"))
+    if not pth_files:
+        raise FileNotFoundError(f"No .pth checkpoint found in {ckpt_dir}")
+    ckpt_file = pth_files[-1]
+    logger.debug("xcodec repo: using checkpoint %s", ckpt_file.name)
+
+    # ── Config ────────────────────────────────────────────────────────────
+    config_yaml = ckpt_dir / "config.yaml"
+    if not config_yaml.exists():
+        raise FileNotFoundError(f"No config.yaml found in {ckpt_dir}")
+
+    # ── sys.path injection ─────────────────────────────────────────────────
+    # models/soundstream_hubert_new.py imports from quantization/, modules/,
+    # utils/, vocos/ — all relative to codec_dir.
+    inserted = codec_dir not in sys.path
+    if inserted:
+        sys.path.insert(0, codec_dir)
+
+    try:
+        # ── Load YAML config ───────────────────────────────────────────────
+        try:
+            import yaml as _yaml
+        except ImportError:
+            raise ImportError(
+                "pyyaml is required to load the xcodec config.yaml. "
+                "Run: pip install pyyaml"
+            )
+        with open(config_yaml, encoding="utf-8") as f:
+            cfg = _yaml.safe_load(f)
+        logger.debug("xcodec repo config keys: %s", list(cfg.keys()) if isinstance(cfg, dict) else type(cfg))
+
+        # ── Import model class ─────────────────────────────────────────────
+        # Flush any stale cached module from a previous (failed) load attempt.
+        for mod_name in list(sys.modules.keys()):
+            if mod_name.startswith("models.") or mod_name == "models":
+                del sys.modules[mod_name]
+
+        from models.soundstream_hubert_new import SoundStream  # type: ignore[import]
+
+        # ── Instantiate from config ────────────────────────────────────────
+        # cfg may be a flat dict of constructor kwargs, or nested under 'model'.
+        if isinstance(cfg, dict):
+            model_kwargs = cfg.get("model", cfg)
+        else:
+            model_kwargs = {}
+
+        try:
+            model = SoundStream(**model_kwargs)
+        except TypeError as e:
+            logger.warning(
+                "SoundStream(**config) failed (%s) — retrying with no args.", e
+            )
+            model = SoundStream()
+
+        # ── Load checkpoint ────────────────────────────────────────────────
+        ckpt = torch.load(str(ckpt_file), map_location="cpu", weights_only=False)
+        if isinstance(ckpt, dict):
+            state_dict = (
+                ckpt.get("model")
+                or ckpt.get("state_dict")
+                or ckpt.get("generator")
+                or ckpt
+            )
+        else:
+            state_dict = ckpt
+
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            logger.debug("xcodec repo: missing state_dict keys: %s", missing[:8])
+        if unexpected:
+            logger.debug("xcodec repo: unexpected state_dict keys: %s", unexpected[:5])
+
+        model = model.to(device).eval()
+        logger.info(
+            "xcodec repo loaded | ckpt=%s | device=%s", ckpt_file.name, device
+        )
+        return _XCodecRepoWrapper(model)
 
     finally:
         if inserted and codec_dir in sys.path:

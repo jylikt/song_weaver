@@ -170,8 +170,9 @@ artifacts/gpu-worker/
 This is the codec YuE was trained with — 8 RVQ codebooks, 24 kHz output.
 
 Loading strategies tried in order:
-1. **Local directory + direct class import** (primary for local snapshots): Scans `model.py`, `modeling_xcodec.py`, `modeling_xcodec2.py` for known class names (`XCodecModel`, `XCodec2Model`, `CodecModel`, `SoundCodec`). Calls `from_pretrained()` directly on the found class, bypassing `AutoConfig`. Falls back to manual JSON config + safetensors/bin weight loading if needed.
-2. **AutoModel with `trust_remote_code=True`** (primary for HF repo ids): Uses `AutoModel.from_pretrained(codec_path, trust_remote_code=True, device_map={"": "cpu"})`. Required for `m-a-p/xcodec_mini_infer` since it ships custom model code.
+1a. **Original m-a-p/xcodec research repo** (`models/soundstream_hubert_new.py` + `final_ckpt/config.yaml` + `ckpt_*.pth`): Detected by layout. Adds the codec dir to `sys.path`, imports `SoundStream`, loads YAML config and `.pth` weights, wraps in `_XCodecRepoWrapper` which implements `decode_code(codes)`.
+1b. **HF-style local directory** (safetensors/bin + model class file at root): Scans `model.py`, `modeling_xcodec.py`, `modeling_xcodec2.py` for known class names (`XCodecModel`, `XCodec2Model`, etc.). Calls `from_pretrained()` directly, bypassing `AutoConfig`.
+2. **AutoModel with `trust_remote_code=True`** (primary for HF repo ids like `m-a-p/xcodec_mini_infer`): Uses `device_map={"": "cpu"}` to avoid meta-device issues.
 3. **Legacy xcodec2/xcodec pip package**: Tries `xcodec2.modeling_xcodec2.XCodec2Model` then `xcodec.modeling_xcodec.XCodecModel`.
 
 **Codec quantizer auto-detection:**  

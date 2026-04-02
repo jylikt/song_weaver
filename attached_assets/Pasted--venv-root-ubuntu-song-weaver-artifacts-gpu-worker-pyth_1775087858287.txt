@@ -1,0 +1,86 @@
+(.venv) root@ubuntu:~/song_weaver/artifacts/gpu-worker# python main.py
+INFO:     Will watch for changes in these directories: ['/root/song_weaver/artifacts/gpu-worker']
+INFO:     Uvicorn running on http://0.0.0.0:9000 (Press CTRL+C to quit)
+INFO:     Started reloader process [11879] using WatchFiles
+INFO:     Started server process [11881]
+INFO:     Waiting for application startup.
+2026-04-01 23:55:01,269 [INFO] app.main — GPU Worker started | env=production | default_model=yue-base | yue_path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | auth=enabled
+INFO:     Application startup complete.
+INFO:     127.0.0.1:40976 - "GET /health HTTP/1.1" 200 OK
+2026-04-01 23:55:06,347 [INFO] app.state — Loading YuE model | path=/root/YuE-s1-7B-anneal-en-icl | device=cuda | dtype=fp16 | trust_remote_code=False
+2026-04-01 23:55:06,415 [DEBUG] watchfiles.main — 3 changes detected: {(<Change.added: 1>, '/root/song_weaver/artifacts/gpu-worker/app/__pycache__/yue_adapter.cpython-310.pyc.137247018025728'), (<Change.added: 1>, '/root/song_weaver/artifacts/gpu-worker/app/__pycache__/yue_adapter.cpython-310.pyc'), (<Change.deleted: 3>, '/root/song_weaver/artifacts/gpu-worker/app/__pycache__/yue_adapter.cpython-310.pyc.137247018025728')}
+2026-04-01 23:55:08,042 [INFO] app.yue_adapter — Detecting model architecture | path=/root/YuE-s1-7B-anneal-en-icl
+2026-04-01 23:55:08,076 [INFO] app.yue_adapter — Detected config class: LlamaConfig
+2026-04-01 23:55:08,076 [INFO] app.yue_adapter — Resolved model family: causal (Llama/decoder-only path)
+2026-04-01 23:55:08,076 [INFO] app.state — Resolved model family: causal
+2026-04-01 23:55:08,799 [INFO] app.yue_adapter — Loading causal LM (AutoModelForCausalLM) | path=/root/YuE-s1-7B-anneal-en-icl
+Loading weights: 100%|███████████████████████████████████████████████████████████████| 291/291 [00:01<00:00, 288.26it/s]
+2026-04-01 23:55:12,057 [INFO] app.yue_adapter — Causal model + tokenizer loaded successfully
+2026-04-01 23:55:12,059 [DEBUG] app.yue_adapter — Reset torch default device to None.
+2026-04-01 23:55:12,059 [INFO] app.yue_adapter — Loading audio codec | path=/root/xcodec | device=cuda
+2026-04-01 23:55:12,059 [DEBUG] app.yue_adapter — Reset torch default device to None.
+2026-04-01 23:55:12,059 [DEBUG] app.yue_adapter — Manual weight load failed: No recognisable codec model class found in /root/xcodec. Expected one of: model.py (XCodecModel/CodecModel/SoundCodec), modeling_xcodec.py (XCodecModel), modeling_xcodec2.py (XCodec2Model). — trying next strategy.
+2026-04-01 23:55:12,059 [DEBUG] app.yue_adapter — AutoModel load failed: Unrecognized model in /root/xcodec. Should have a `model_type` key in its config.json. — trying next strategy.
+2026-04-01 23:55:12,059 [DEBUG] app.yue_adapter — Reset torch default device to None.
+2026-04-01 23:55:12,070 [DEBUG] torio._extension.utils — Loading FFmpeg6
+2026-04-01 23:55:12,071 [DEBUG] torio._extension.utils — Failed to load FFmpeg6 extension.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torch/_ops.py", line 1350, in load_library
+    ctypes.CDLL(path)
+  File "/usr/lib/python3.10/ctypes/__init__.py", line 374, in __init__
+    self._handle = _dlopen(self._name, mode)
+OSError: libavutil.so.58: cannot open shared object file: No such file or directory
+2026-04-01 23:55:12,072 [DEBUG] torio._extension.utils — Loading FFmpeg5
+2026-04-01 23:55:12,072 [DEBUG] torio._extension.utils — Failed to load FFmpeg5 extension.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torio/_extension/utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "/root/song_weaver/artifacts/gpu-worker/.venv/lib/python3.10/site-packages/torch/_ops.py", line 1350, in load_library
+    ctypes.CDLL(path)
+  File "/usr/lib/python3.10/ctypes/__init__.py", line 374, in __init__
+    self._handle = _dlopen(self._name, mode)
+OSError: libavutil.so.57: cannot open shared object file: No such file or directory
+2026-04-01 23:55:12,072 [DEBUG] torio._extension.utils — Loading FFmpeg4
+2026-04-01 23:55:12,106 [DEBUG] torio._extension.utils — Successfully loaded FFmpeg4
+2026-04-01 23:55:12,247 [INFO] root — lm_eval is not installed, GPTQ may not be usable
+2026-04-01 23:55:12,968 [DEBUG] datasets — PyTorch version 2.5.0 available.
+2026-04-01 23:55:13,300 [DEBUG] app.yue_adapter — xcodec2-pkg load failed: 'NoneType' object has no attribute 'device'
+2026-04-01 23:55:13,300 [ERROR] app.yue_adapter — Failed to load audio codec from '/root/xcodec': 'NoneType' object has no attribute 'device'
+Generations will fall back to silent WAV.
+Fix options:
+  • Set YUE_CODEC_PATH='m-a-p/xcodec_mini_infer' (recommended HF repo).
+  • Download the m-a-p/xcodec_mini_infer snapshot and set YUE_CODEC_PATH
+    to that local directory (must contain model.py + weight files).
+  • Set YUE_REPO_PATH to a cloned HKUSTAudio/YuE repo for native inference.
+2026-04-01 23:55:13,300 [INFO] app.state — YuE model ready | model=yue-base | family=causal | device=cuda | dtype=fp16 | load_time=7.0s
+INFO:     127.0.0.1:40976 - "POST /load-model HTTP/1.1" 200 OK
+2026-04-01 23:55:13,309 [INFO] app.routes.generate — Generation start | job=d2d60f6d-765d-4dcd-8962-42743bf69239 | model=yue-base | family=causal | stub=False | style=hip_hop | duration=10s | seed=None
+2026-04-01 23:55:13,309 [INFO] app.yue_adapter — Causal inference start | job=d2d60f6d-765d-4dcd-8962-42743bf69239 | prompt_chars=609 | duration=10s | codec_loaded=False | text_vocab_size=32000
+2026-04-01 23:55:13,314 [INFO] app.yue_adapter — Token budget | prompt=203 | max_new=6000 | ctx_limit=16384 | ideal=6000
+2026-04-01 23:56:53,921 [INFO] app.yue_adapter — Token extraction | generated=6000 | audio=5102 | text_vocab_size=32000
+2026-04-01 23:56:53,922 [ERROR] app.routes.generate — Inference failed | job=d2d60f6d-765d-4dcd-8962-42743bf69239 | error=Audio codec not loaded (5102 audio tokens extracted but cannot decode).
+Fix: set YUE_CODEC_PATH='m-a-p/xcodec_mini_infer' or a local snapshot, or set YUE_REPO_PATH to the HKUSTAudio/YuE repo for native inference.
+Traceback (most recent call last):
+  File "/root/song_weaver/artifacts/gpu-worker/app/routes/generate.py", line 105, in generate
+    await loop.run_in_executor(
+  File "/usr/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/root/song_weaver/artifacts/gpu-worker/app/routes/generate.py", line 193, in _run_inference
+    run_yue_inference(
+  File "/root/song_weaver/artifacts/gpu-worker/app/yue_adapter.py", line 616, in run_yue_inference
+    _run_causal_inference(
+  File "/root/song_weaver/artifacts/gpu-worker/app/yue_adapter.py", line 892, in _run_causal_inference
+    raise RuntimeError(
+RuntimeError: Audio codec not loaded (5102 audio tokens extracted but cannot decode).
+Fix: set YUE_CODEC_PATH='m-a-p/xcodec_mini_infer' or a local snapshot, or set YUE_REPO_PATH to the HKUSTAudio/YuE repo for native inference.
+INFO:     127.0.0.1:40976 - "POST /generate HTTP/1.1" 500 Internal Server Error
