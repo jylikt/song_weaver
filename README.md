@@ -1,414 +1,253 @@
-# SongGen — AI Song Generation Service
+# Song Weaver
 
-A production-style Python service for **lyrics-based AI song generation**, built with FastAPI, clean layered architecture, and a pluggable provider backend system. Designed as a technical demonstration of how to scaffold, orchestrate, and extend an ML inference pipeline — with or without a real model attached.
+**Song Weaver** — сервис генерации музыки по тексту (lyrics-to-song), построенный на архитектуре «оркестратор + удалённый GPU-воркер». Пользователь вводит жанровые теги и текст песни, система создаёт задание, маршрутизирует его на GPU-инфраструктуру и возвращает готовый WAV-файл с вокалом и аккомпанементом.
 
-> **Replit is used as the primary development and orchestration layer.**  
-> The main API service runs here. Heavy model inference (AudioCraft, Bark, Suno-style models) is designed to run on an external GPU machine, represented by the separate `gpu-worker` service. Both communicate over HTTP with a clearly defined contract.
-
----
-
-## Overview
-
-SongGen accepts a song prompt, full lyrics, style preset, duration, and optional seed — then routes the job to one of two backends:
-
-| Mode | Backend | Use Case |
-|---|---|---|
-| `local` | `LocalMusicGenerator` | Fast, no GPU. Stub outputs silent WAV. Swap in a CPU-capable model here. |
-| `remote_gpu` | `RemoteGpuMusicGenerator` → gpu-worker | For large models (AudioCraft, Bark, custom fine-tunes) on separate GPU hardware. |
-
-Jobs flow through an async pipeline: **queued → running → completed / failed**. Results include a downloadable WAV file, full metadata, and a copy of the lyrics used.
+Проект представляет собой **production-like MVP**: полноценный REST API, веб-интерфейс, асинхронная очередь заданий и реальная интеграция с языковой моделью для генерации музыки.
 
 ---
 
-## Architecture
+## Ключевые возможности
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Client (Browser / curl)                       │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │  HTTP
-┌────────────────────────────▼────────────────────────────────────────┐
-│              Song Generation API  (port 8000)                        │
-│                                                                      │
-│  Web UI  (/index.html)           Jinja2 + Tailwind + vanilla JS     │
-│  REST API (/api/v1/*)            FastAPI + Pydantic v2              │
-│                                                                      │
-│  ┌─────────────┐  ┌──────────────────────┐  ┌──────────────────┐   │
-│  │  Job Store  │  │  Generation Service  │  │  Provider Factory│   │
-│  │ (in-memory) │  │  (async task queue)  │  │  (lru_cache)     │   │
-│  └─────────────┘  └──────────┬───────────┘  └────────┬─────────┘   │
-│                               │                       │             │
-│              ┌────────────────┴──────────┐            │             │
-│              │                           │            │             │
-│    ┌─────────▼──────────┐   ┌───────────▼────────────▼──────────┐  │
-│    │ LocalMusicGenerator│   │       RemoteGpuMusicGenerator      │  │
-│    │  (runs in-process) │   │  GET /health → POST /load-model    │  │
-│    │  [stub → real model│   │  → POST /generate → GET audio_url  │  │
-│    │   goes here]       │   │                                    │  │
-│    └────────────────────┘   └───────────────────┬───────────────┘  │
-└────────────────────────────────────────────────  │  ────────────────┘
-                                                   │  HTTP
-┌──────────────────────────────────────────────────▼──────────────────┐
-│              GPU Worker Service  (port 9000)                         │
-│                                                                      │
-│  GET  /health          Model state + GPU telemetry                  │
-│  POST /load-model      Load model into VRAM                         │
-│  POST /generate        Run inference → return audio_url             │
-│  POST /unload-model    Free VRAM                                    │
-│  GET  /output/{file}   Serve generated WAV                          │
-│                                                                      │
-│  WorkerState singleton: model lifecycle + simulated GPU metrics     │
-│  [_run_inference() → replace with real model call]                  │
-└─────────────────────────────────────────────────────────────────────┘
-```
+- **REST API** — приём заданий, отслеживание статуса, скачивание результата
+- **Веб-интерфейс** — UI на Tailwind CSS с HTML5-плеером для прослушивания прямо в браузере
+- **Асинхронная очередь** — задания проходят через состояния `queued → running → completed / failed`, клиент отслеживает статус полингом
+- **Два режима работы** — `local` (заглушка, тихий WAV для разработки) и `remote_gpu` (реальный инференс на GPU-сервере)
+- **Удалённый GPU-воркер** — тяжёлый инференс вынесен в отдельный FastAPI-сервис, запускаемый на машине с GPU
+- **Управление моделью по требованию** — загрузка и выгрузка из VRAM через `/load-model` / `/unload-model`
+- **Swagger / OpenAPI** — автодокументация на обоих сервисах по адресу `/docs`
 
 ---
 
-## Project Structure
+## Архитектура
 
 ```
-.
-├── README.md
-├── examples/
-│   ├── lyrics_pop.txt            Sample pop song lyrics
-│   ├── lyrics_electronic.txt     Sample synthwave lyrics
-│   ├── lyrics_orchestral.txt     Sample orchestral/cinematic lyrics
-│   └── api_requests.sh           Ready-to-run curl examples
-│
-├── artifacts/
-│   ├── song-gen/                 Main FastAPI service (port 8000)
-│   │   ├── main.py
-│   │   ├── requirements.txt
-│   │   ├── .env.example
-│   │   ├── generated/            Output audio files
-│   │   └── app/
-│   │       ├── config.py         Settings (pydantic-settings)
-│   │       ├── models/
-│   │       │   └── generation.py Job, request, response schemas
-│   │       ├── providers/
-│   │       │   ├── base.py       BaseMusicGenerator ABC
-│   │       │   ├── local_generator.py   ← stub + real model goes here
-│   │       │   ├── remote_gpu_generator.py  ← HTTP client for gpu-worker
-│   │       │   └── factory.py    Provider registry + lru_cache singletons
-│   │       ├── services/
-│   │       │   ├── job_store.py  In-memory async job store
-│   │       │   └── generation_service.py  Job orchestration
-│   │       ├── routes/
-│   │       │   ├── generation.py  POST /generate, GET /jobs/{id}, etc.
-│   │       │   ├── health.py      GET /api/v1/health
-│   │       │   └── providers.py   GET /api/v1/providers
-│   │       └── templates/
-│   │           └── index.html    Jinja2 web UI
-│   │
-│   └── gpu-worker/               Separate inference worker (port 9000)
-│       ├── main.py
-│       ├── requirements.txt
-│       ├── .env.example
-│       ├── output/               Generated WAVs served as static files
-│       └── app/
-│           ├── config.py
-│           ├── state.py          WorkerState — model lifecycle + GPU telemetry
-│           ├── models.py         All request/response schemas
-│           ├── auth.py           Optional Bearer-token auth
-│           └── routes/
-│               ├── health.py
-│               ├── model.py      POST /load-model, POST /unload-model
-│               └── generate.py  ← real inference code goes here
+┌──────────────────────────────────────────────────────────┐
+│                   Клиент / браузер                        │
+└─────────────────────────┬────────────────────────────────┘
+                          │  HTTP
+                          ▼
+┌──────────────────────────────────────────────────────────┐
+│        Song-Gen Service  (FastAPI, порт 8000)            │
+│                                                          │
+│  • Приём заданий            • Веб-UI (Jinja2)            │
+│  • Очередь заданий          • Раздача готовых WAV        │
+│  • ProviderFactory                                       │
+│    ├─ LocalMusicGenerator    (заглушка, разработка)      │
+│    └─ RemoteGpuMusicGenerator ──────────────────────────┐│
+└──────────────────────────────────────────────────────────┘│
+                                                            ││  HTTP + Bearer token
+                          ┌─────────────────────────────────┘
+                          ▼
+┌──────────────────────────────────────────────────────────┐
+│        GPU Worker Service  (FastAPI, порт 9000)          │
+│                                                          │
+│  • /load-model   — загрузка модели в VRAM               │
+│  • /unload-model — освобождение VRAM                    │
+│  • /generate     — инференс                             │
+│  • Телеметрия VRAM в /health                            │
+│                                                          │
+│  Модели:  YuE-s1-7B  +  xcodec_mini_infer               │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Song-Gen** — оркестрирующий слой: принимает запросы, управляет очередью, сохраняет готовые файлы. Никакого ML-кода здесь нет — только координация.
+
+**GPU Worker** — слой инференса. Может быть поднят на любом сервере с GPU и подключён к оркестратору через переменную `REMOTE_WORKER_URL`. Архитектура позволяет масштабироваться от одного GPU-сервера до пула воркеров за балансировщиком нагрузки.
+
+---
+
+## Стек генерации
+
+Реальная генерация выполняется с помощью двух открытых моделей:
+
+| Компонент | Модель | Назначение |
+|-----------|--------|------------|
+| Языковая модель | [YuE-s1-7B-anneal-en-icl](https://huggingface.co/HKUSTAudio/YuE-s1-7B-anneal-en-icl) | Генерация музыкальных токенов по жанру и тексту |
+| Аудио-кодек | [xcodec_mini_infer](https://huggingface.co/m-a-p/xcodec_mini_infer) | Декодирование токенов в WAV (8 RVQ кодбуков, 24 kHz) |
+
+YuE — open-source модель для генерации песен с вокалом по текстовым подсказкам. Репозиторий: [m-a-p/YuE](https://github.com/multimodal-art-projection/YuE).
+
+Генерация проходит в два этапа:
+1. YuE генерирует последовательность аудио-токенов по жанровым тегам и тексту песни (Stage 1 + Stage 2)
+2. xcodec декодирует токены в WAV-аудиофайл
+
+Загрузчик xcodec в `yue_adapter.py` точно воспроизводит поведение `infer.py` из официального репозитория YuE: `OmegaConf.load(config.yaml)` → `eval(cfg.generator.name)(**cfg.generator.config)` → `load_state_dict(ckpt['codec_model'])`.
+
+Итоговый результат — реальный сгенерированный аудиофайл, а не заглушка.
+
+---
+
+## Как это работает
+
+```
+1. Пользователь вводит жанровые теги и текст песни в веб-интерфейсе
+
+2. POST /api/v1/generate
+   → Song-Gen создаёт задание, присваивает job_id (статус: queued)
+
+3. Song-Gen маршрутизирует задание через ProviderFactory:
+   • local      → тихий WAV (заглушка, для разработки)
+   • remote_gpu → HTTP-запрос на GPU Worker с токеном авторизации
+
+4. GPU Worker:
+   • Загружает YuE + xcodec в VRAM (если ещё не загружены)
+   • Stage 1: YuE генерирует музыкальные токены
+   • Stage 2: уточнение и расширение токенного ряда
+   • xcodec декодирует токены в WAV
+   • Возвращает URL результата
+
+5. Song-Gen сохраняет файл, устанавливает статус → completed
+
+6. Клиент опрашивает GET /api/v1/jobs/{id}
+   → При completed — получает ссылку, воспроизводит в плеере или скачивает
 ```
 
 ---
 
-## Running Locally
+## API
 
-### Prerequisites
+### Song-Gen (порт 8000)
 
-- Python 3.11+
-- pip
+| Метод | Путь | Описание |
+|-------|------|----------|
+| `GET` | `/` | Веб-интерфейс |
+| `POST` | `/api/v1/generate` | Создать задание генерации |
+| `GET` | `/api/v1/jobs/{id}` | Получить статус задания |
+| `GET` | `/api/v1/jobs/{id}/result` | Метаданные и ссылка на файл |
+| `GET` | `/api/v1/jobs/{id}/download` | Скачать WAV-файл |
+| `GET` | `/api/v1/health` | Состояние сервиса и активный провайдер |
+| `GET` | `/api/v1/providers` | Список доступных провайдеров |
+| `GET` | `/docs` | Swagger UI |
 
-### 1. Start the main service
+### GPU Worker (порт 9000)
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| `GET` | `/health` | Статус воркера, состояние модели, VRAM-телеметрия |
+| `POST` | `/load-model` | Загрузить модель в VRAM |
+| `POST` | `/unload-model` | Выгрузить модель, освободить VRAM |
+| `POST` | `/generate` | Запустить инференс |
+| `GET` | `/output/{file}` | Скачать результат |
+| `GET` | `/docs` | Swagger UI |
+
+Пример тела запроса `POST /api/v1/generate`:
+
+```json
+{
+  "style_prompt": "pop upbeat female vocal 120bpm",
+  "lyrics": "[verse]\nHere come the words...\n\n[chorus]\nThis is the chorus..."
+}
+```
+
+---
+
+## Запуск проекта
+
+### Оркестрирующий сервис (Song-Gen)
 
 ```bash
 cd artifacts/song-gen
 pip install -r requirements.txt
-cp .env.example .env          # edit if needed
-python main.py
-# → http://localhost:8000
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-### 2. Start the GPU worker (optional — needed for `mode: remote_gpu`)
+Переменные окружения:
+
+| Переменная | По умолчанию | Описание |
+|------------|-------------|----------|
+| `GENERATOR_PROVIDER` | `local` | `local` или `remote_gpu` |
+| `REMOTE_WORKER_URL` | — | URL GPU-воркера, напр. `http://gpu-server:9000` |
+| `REMOTE_WORKER_TOKEN` | — | Bearer-токен для авторизации запросов к воркеру |
+| `REMOTE_WORKER_TIMEOUT_SEC` | `1800` | Таймаут инференса в секундах |
+| `OUTPUT_DIR` | `generated` | Папка для сохранения WAV-файлов |
+
+### GPU Worker
+
+Запускается на машине с GPU (CUDA 12.1+, Python 3.11+):
 
 ```bash
 cd artifacts/gpu-worker
 pip install -r requirements.txt
-cp .env.example .env          # set WORKER_TOKEN if desired
-python main.py
-# → http://localhost:9000
+pip install torch==2.3.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
+uvicorn app.main:app --host 0.0.0.0 --port 9000
 ```
 
-### 3. Open Swagger UI
+Переменные окружения:
 
-- Main API: http://localhost:8000/docs  
-- GPU Worker: http://localhost:9000/docs
+| Переменная | Описание |
+|------------|----------|
+| `YUE_MODEL_PATH` | Путь к чекпоинту YuE или HF repo id. Без этой переменной воркер работает в stub-режиме (тихий WAV). |
+| `YUE_CODEC_PATH` | Путь к локальному снимку `xcodec_mini_infer` (напр. `/root/xcodec`) |
+| `YUE_DEVICE` | `cuda` или `cpu` |
+| `YUE_REPO_PATH` | Путь к исходникам репозитория YuE (для subprocess-режима) |
+| `WORKER_TOKEN` | Bearer-токен, который проверяет воркер |
 
----
-
-## Demo Flow
-
-### Web UI (recommended for video demos)
-
-1. Open **http://localhost:8000** in your browser.
-2. Fill in the **Prompt** — e.g. `"Uplifting synth-pop anthem about finding yourself after heartbreak"`.
-3. Paste lyrics from `examples/lyrics_pop.txt` into the **Lyrics** field.
-4. Choose a **Style Preset** (e.g. Electronic) and set **Duration** to 10s.
-5. Select **Mode**: `Local` (instant) or `GPU Worker` (exercises the worker integration).
-6. Click **Generate Song** — the job panel appears immediately with a status badge.
-7. Watch the progress bar animate while the job runs.
-8. When complete, the result panel shows:
-   - HTML5 audio player (plays the generated WAV).
-   - Metadata card (provider, style, seed, output path).
-   - Collapsible lyrics section.
-9. Click **Download WAV** to save the file.
-
-### curl Demo
+После запуска — загрузить модели:
 
 ```bash
-# 1. Submit a generation job
-curl -s -X POST http://localhost:8000/api/v1/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Uplifting synth-pop anthem, driving at night, neon lights",
-    "lyrics": "[Verse 1]\nStreetlights blur like watercolors on the glass\nI have been running from the echoes of the past\n\n[Chorus]\nI am the neon afterglow\nBrighter when the darkness falls below",
-    "style_preset": "electronic",
-    "duration_sec": 10,
-    "seed": 42,
-    "mode": "local"
-  }'
-
-# → { "job_id": "abc-123", "status": "queued", "mode": "local" }
-
-# 2. Poll job status
-curl -s http://localhost:8000/api/v1/jobs/abc-123
-
-# 3. Get result + metadata (once status is "completed")
-curl -s http://localhost:8000/api/v1/jobs/abc-123/result
-
-# 4. Download generated audio
-curl -s http://localhost:8000/api/v1/jobs/abc-123/download -o song.wav
-```
-
-> All example requests are available as a ready-to-run script in `examples/api_requests.sh`.
-
----
-
-## API Reference
-
-### Song Generation API (port 8000)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/generate` | Submit a generation job. Returns `job_id` immediately. |
-| `GET` | `/api/v1/jobs/{id}` | Poll job status: `queued / running / completed / failed`. |
-| `GET` | `/api/v1/jobs/{id}/result` | Full result: download URL, metadata, lyrics used. |
-| `GET` | `/api/v1/jobs/{id}/download` | Stream the generated WAV file. |
-| `GET` | `/api/v1/health` | Service health, uptime, active provider. |
-| `GET` | `/api/v1/providers` | List backends and their current availability. |
-| `GET` | `/docs` | Interactive Swagger UI. |
-
-#### `POST /api/v1/generate` — request body
-
-```json
-{
-  "prompt":       "Uplifting synth-pop anthem about finding yourself",
-  "lyrics":       "[Verse 1]\n...\n[Chorus]\n...",
-  "style_preset": "electronic",
-  "duration_sec": 30,
-  "seed":         42,
-  "mode":         "local"
-}
-```
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `prompt` | string | Yes | Natural-language song description. |
-| `lyrics` | string | Yes | Full lyrics with `[Verse]` / `[Chorus]` / `[Bridge]` markers. |
-| `style_preset` | enum | No | `pop / rock / hip_hop / rnb / electronic / jazz / classical / country / folk / metal / custom` |
-| `duration_sec` | int | No | 5–300 seconds. Default: 30. |
-| `seed` | int | No | Seed for reproducible output (same seed + same prompt = same output). |
-| `mode` | enum | No | `local` or `remote_gpu`. Overrides `GENERATOR_PROVIDER` env var. |
-
-### GPU Worker API (port 9000)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/health` | No | Model state, GPU telemetry, generation count. |
-| `POST` | `/load-model` | Bearer | Load a named model. Idempotent. Swaps if different model is active. |
-| `POST` | `/unload-model` | Bearer | Free the model from VRAM. |
-| `POST` | `/generate` | Bearer | Run inference. Auto-loads default model if none is loaded. |
-| `GET` | `/output/{filename}` | No | Download generated WAV. |
-
----
-
-## Local vs Remote GPU Mode
-
-```
-mode: "local"                          mode: "remote_gpu"
-─────────────────────────────────      ─────────────────────────────────────────
-Runs inside the main FastAPI process   Sends work to gpu-worker over HTTP
-
-Good for:                              Good for:
-  · Fast iteration / prototyping         · Large models (AudioCraft, Bark)
-  · CI / testing without GPU             · Models that need 8–80 GB VRAM
-  · CPU-capable models                   · Running worker on separate GPU cloud
-
-Integration point:                     Integration point:
-  app/providers/local_generator.py       artifacts/gpu-worker/app/routes/generate.py
-  → _run_model()                         → _run_inference()
-
-Model is loaded once on startup        Model is loaded on /load-model call
-(via lru_cache singleton)              and cached in WorkerState until unloaded
-```
-
-Per-request mode selection is always available via the `mode` field, regardless of the `GENERATOR_PROVIDER` server default.
-
----
-
-## Integrating a Real Lyrics-to-Song Model
-
-The system is designed so that plugging in a real open-source model requires changes to **exactly two functions** with no other code changes needed.
-
-### Option A — Local Provider (small / CPU models)
-
-**File:** `artifacts/song-gen/app/providers/local_generator.py`  
-**Function:** `LocalMusicGenerator._run_model()`
-
-```python
-def _run_model(self, request: GenerationRequest, output_path: Path) -> None:
-    # ── REPLACE THIS STUB ─────────────────────────────────────────────────
-    # Example using AudioCraft MusicGen:
-    #
-    #   import torch, torchaudio
-    #   from audiocraft.models import MusicGen
-    #
-    #   if request.seed is not None:
-    #       torch.manual_seed(request.seed)
-    #
-    #   # self._model is loaded once in __init__
-    #   self._model.set_generation_params(duration=request.duration_sec)
-    #
-    #   # Lyrics-conditioned generation (requires a fine-tuned model):
-    #   wav = self._model.generate_with_lyrics(
-    #       descriptions=[request.prompt],
-    #       lyrics=[request.lyrics],
-    #   )
-    #
-    #   # Prompt-only (base MusicGen, no lyrics conditioning):
-    #   wav = self._model.generate([request.prompt])
-    #
-    #   torchaudio.save(str(output_path), wav[0].cpu(), self._model.sample_rate)
-    # ──────────────────────────────────────────────────────────────────────
-    self._write_silent_wav(output_path, duration_sec=request.duration_sec)
-```
-
-Also update `__init__` to load the model once:
-```python
-def __init__(self) -> None:
-    from audiocraft.models import MusicGen
-    self._model = MusicGen.get_pretrained("medium")   # or "large", "melody"
-```
-
-### Option B — GPU Worker (large models, separate hardware)
-
-**File:** `artifacts/gpu-worker/app/routes/generate.py`  
-**Function:** `_run_inference()`
-
-Full step-by-step guidance is in the docstring. The key lines to replace:
-
-```python
-def _run_inference(body: GenerateRequest, output_path: Path) -> None:
-    # ── REPLACE THIS STUB with real model inference ───────────────────────
-    #
-    # The model instance lives in worker_state (loaded via /load-model).
-    # Access it as: worker_state._model_instance
-    #
-    # Example (MusicGen):
-    #   worker_state._model_instance.set_generation_params(duration=body.duration_sec)
-    #   wav = worker_state._model_instance.generate_with_lyrics(
-    #       descriptions=[body.prompt],
-    #       lyrics=[body.lyrics],
-    #   )
-    #   torchaudio.save(str(output_path), wav[0].cpu(), sample_rate)
-    # ──────────────────────────────────────────────────────────────────────
-    _write_silent_wav(output_path, duration_sec=body.duration_sec)
+curl -X POST http://gpu-server:9000/load-model \
+     -H "Authorization: Bearer <WORKER_TOKEN>"
 ```
 
 ---
 
-## Fine-Tuning & Task-Specific Adaptation
+## Технические решения
 
-The architecture is built to support progressive model improvement. Here are the key hooks:
+### Почему инференс вынесен в отдельный сервис
 
-### Fine-tuning a base model on your lyrics corpus
+Модели класса YuE-s1-7B требуют GPU с не менее 16–24 ГБ VRAM. Платформа Replit предоставляет удобную среду для разработки и оркестрации, но не предназначена для тяжёлого ML-инференса. Разделение на оркестратор и воркер — осознанное архитектурное решение, отражающее реальную production-практику:
 
-1. **Prepare data** — the `lyrics` field in every request is stored verbatim in job metadata. Export it as a fine-tuning corpus:
-   ```bash
-   # Query all completed jobs and extract lyrics
-   # (see services/job_store.py — swap InMemoryJobStore for a DB-backed one first)
-   ```
+- Воркеры масштабируются независимо от API-слоя
+- Модель можно менять или перезагружать без перезапуска API
+- VRAM, статус загрузки и здоровье воркера мониторируются отдельно
+- Достаточно поставить балансировщик перед пулом GPU-воркеров, чтобы выйти на горизонтальное масштабирование
 
-2. **Fine-tune** — use your model's fine-tuning pipeline (e.g. AudioCraft's `train.py`, or LoRA for transformer-based music models). The style preset and prompt fields give you structured supervision signals.
+### Архитектура провайдеров
 
-3. **Swap in the fine-tuned weights** — in `local_generator.py` or `gpu-worker/app/state.py → load_model()`, change the pretrained model name/path to your fine-tuned checkpoint:
-   ```python
-   # artifacts/gpu-worker/app/state.py → load_model()
-   # TODO: replace "musicgen-medium" with your fine-tuned checkpoint path
-   self._model_instance = MusicGen.get_pretrained("/models/my-lyrics-finetuned-v1")
-   ```
+`ProviderFactory` позволяет переключать бэкенд через переменную `GENERATOR_PROVIDER` без изменения кода. `local`-провайдер закрывает потребности разработки и тестирования; `remote_gpu` — production-путь.
 
-4. **Multi-model routing** — add a new `GeneratorProvider` enum value in `config.py` and a new provider class in `providers/`. Register it in `factory.py`. The `mode` field in each request can then target it explicitly.
+### Хранилище заданий
 
-### Adding a cloud API provider (e.g. Suno, Udio, ElevenLabs)
+`InMemoryJobStore` покрывает требования MVP. Интерфейс намеренно абстрагирован — замена на Redis или PostgreSQL требует только нового класса-реализации.
 
-Create `artifacts/song-gen/app/providers/cloud_api_generator.py`:
-```python
-class CloudApiMusicGenerator(BaseMusicGenerator):
-    async def generate_song(self, request, output_dir, job_id) -> Path:
-        # POST to your cloud API, poll for result, download audio
-        ...
+---
+
+## Возможные улучшения
+
+- **Пул воркеров** — балансировка между несколькими GPU-серверами
+- **Персистентная очередь** — Redis / RabbitMQ вместо in-memory хранилища
+- **Выбор модели** — поддержка нескольких чекпоинтов или моделей через параметр запроса
+- **WebSocket-обновления** — замена полинга на push-уведомления о статусе
+- **Мониторинг** — Prometheus-метрики: VRAM, время инференса, глубина очереди
+- **Авторизация** — OAuth2 / API-ключи для разграничения доступа
+- **Fine-tuning** — адаптация модели на конкретные жанры, стили или голоса
+
+---
+
+## Результаты / Deliverables
+
+- **Исходный код** — полный репозиторий GitHub с обоими сервисами
+- **Демо-видео** — запись работающей генерации end-to-end
+- **Сгенерированный трек** — пример реального WAV-файла, созданного с помощью YuE + xcodec
+
+---
+
+## Структура репозитория
+
 ```
-Then register it in `factory.py`. No other code changes needed.
-
----
-
-## Configuration Reference
-
-### Main service (song-gen)
-
-| Variable | Default | Description |
-|---|---|---|
-| `GENERATOR_PROVIDER` | `local` | Default backend: `local` or `remote_gpu` |
-| `OUTPUT_DIR` | `generated` | Directory for saved WAV files |
-| `REMOTE_WORKER_URL` | `http://localhost:9000` | URL of the gpu-worker |
-| `REMOTE_WORKER_TOKEN` | _(blank)_ | Bearer token; leave blank to disable auth |
-| `REMOTE_WORKER_TIMEOUT_SEC` | `300` | Request timeout in seconds |
-| `APP_ENV` | `development` | `development` or `production` |
-| `LOG_LEVEL` | `INFO` | Python log level |
-
-### GPU worker (gpu-worker)
-
-| Variable | Default | Description |
-|---|---|---|
-| `PORT` | `9000` | Port the worker listens on |
-| `WORKER_TOKEN` | _(blank)_ | Bearer token; blank = auth disabled |
-| `DEFAULT_MODEL_NAME` | `musicgen-medium` | Model loaded when none is specified |
-| `OUTPUT_DIR` | `output` | Directory for generated WAVs |
-| `SIMULATED_VRAM_TOTAL_GB` | `24.0` | Reported VRAM total in /health |
-
----
-
-## Design Notes
-
-- **No real ML model is embedded.** Both providers write a silent WAV stub. All job orchestration, status tracking, metadata, and API flows work fully. Integrating a real model requires changing one function in one file.
-- **Job store is in-memory** (`InMemoryJobStore`). For production, replace with a Redis or Postgres-backed store — the interface is a simple async `get/put` that is straightforward to swap.
-- **Lyrics are first-class.** The `lyrics` field is validated, stored in job metadata, returned in results, and displayed in the UI. Every integration guide includes lyrics-conditioned generation as the primary path.
-- **The worker is stateful by design.** It holds model weights in (simulated) VRAM between calls, mirrors how a real GPU worker would operate — you wouldn't reload a 7B-param model for every request.
-- **Replit as orchestration layer.** The main service and GPU worker communicate over HTTP. In production, replace `REMOTE_WORKER_URL` with your GPU machine's public address. The Replit service handles UI, job queue, status polling, and result serving. The GPU machine handles only raw inference.
+artifacts/
+  song-gen/           # Оркестрирующий FastAPI-сервис (порт 8000)
+    app/
+      routes/         # API-эндпоинты
+      providers/      # local и remote_gpu провайдеры
+      services/       # Бизнес-логика (очередь заданий)
+      templates/      # Jinja2 шаблоны веб-UI
+  gpu-worker/         # GPU-инференс FastAPI-сервис (порт 9000)
+    app/
+      routes/         # /generate, /load-model, /health
+      yue_adapter.py  # Интеграция YuE + xcodec
+      state.py        # Управление жизненным циклом модели
+lib/
+  api-spec/           # OpenAPI-спецификации
+  db/                 # Схема базы данных (для будущего расширения)
+```
