@@ -230,6 +230,10 @@ class WorkerState:
                     codec_path=settings.yue_codec_path,
                     device=device,
                     hf_token=settings.yue_hf_token,
+                    n_codebooks=settings.yue_codec_n_codebooks,
+                    sample_rate=settings.yue_sample_rate,
+                    codec_samples_per_frame=settings.yue_codec_samples_per_frame,
+                    xcodec_tokens_fps=settings.yue_xcodec_tokens_fps,
                 )
             else:
                 self._codec = None
@@ -254,9 +258,9 @@ class WorkerState:
                     )
                     self._codec_n_codebooks = detected
                 else:
-                    logger.warning(
-                        "Could not auto-detect codec n_quantizers; "
-                        "falling back to yue_codec_n_codebooks=%d.",
+                    logger.info(
+                        "Using yue_codec_n_codebooks=%d (auto-detect skipped or unavailable; "
+                        "SoundStream repo uses mm tokenizer offsets — see yue_mm_xcodec_*).",
                         settings.yue_codec_n_codebooks,
                     )
 

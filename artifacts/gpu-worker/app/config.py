@@ -27,6 +27,13 @@ class GenerationBackend(str, Enum):
     YUE_NATIVE = "yue_native"
 
 
+class CausalMmCapWindow(str, Enum):
+    """Which part of the mm codec stream to keep when longer than requested."""
+
+    HEAD = "head"  # first N interleaved tokens (chronological intro)
+    TAIL = "tail"  # last N tokens — often less empty intro on causal generate()
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -103,23 +110,51 @@ class Settings(BaseSettings):
     yue_codec_n_codebooks: int = 8
 
     # ── Audio token extraction ────────────────────────────────────────────────
-    # YuE extends the Llama-2 vocabulary with audio codec tokens.
-    # Text tokens occupy IDs [0, yue_text_vocab_size).
-    # Audio codec tokens occupy IDs [yue_text_vocab_size, full_vocab_size).
-    #
-    # IMPORTANT: tokenizer.vocab_size returns the FULL extended vocabulary
-    # (e.g. 83734) which includes audio tokens — do NOT use it as this threshold.
-    # The correct value is the original Llama-2 text vocabulary size: 32000.
+    # YuE mmtokenizer v0.2 (YuE inference/codecmanipulator.py):
+    #   text 0–31999, specials 32000–32021, then per-codec ranges.
+    # xcodec uses 1024 entries per codebook; tokenizer IDs are NOT (id - 32000).
+    # Flat interleave order matches (time × codebook): t0_cb0…t0_cb{K-1}, t1_cb0…
+    # Defaults match CodecManipulator("xcodec"): global_offset 45334, K=8 for stage-2 decode.
     yue_text_vocab_size: int = 32000
+    yue_mm_xcodec_global_offset: int = 45334
+    yue_mm_xcodec_codebook_size: int = 1024
+    # Frames per second of **audio** implied by the codec (used for token budget
+    # and duration cap). YuE mm tokenizer often uses ~50 steps/s, but m-a-p
+    # SoundStream in the research xcodec repo is ~75 frames/s at 24 kHz
+    # (~320 samples/frame). When 0, the worker probes SoundStream.decode;
+    # otherwise this value is used if probing fails or for non-repo codecs.
+    yue_xcodec_tokens_fps: int = 50
+    # Override samples per codec time-step for duration math (0 = auto-probe
+    # for _XCodecRepoWrapper only). Example: 320 for m-a-p SoundStream @ 24 kHz.
+    yue_codec_samples_per_frame: int = 0
+    # Inflate max_new_tokens for causal mm path (not every token is xcodec ID).
+    # Output length is still capped to requested duration (tokens + waveform trim).
+    yue_causal_mm_budget_multiplier: float = 1.45
+    # After decode, trim WAV to duration_sec × sample_rate (fixes 10s request → 15s file).
+    yue_trim_waveform_to_request_duration: bool = True
+    # When generated mm tokens exceed the duration cap: keep first (head) or last
+    # (tail) window. Tail often reduces long low-energy intros on built-in causal.
+    yue_causal_mm_cap_window: CausalMmCapWindow = CausalMmCapWindow.TAIL
 
     # ── Native YuE subprocess inference ──────────────────────────────────────
-    # Set to the path of a cloned HKUSTAudio/YuE GitHub repository.
-    # When set, the worker calls infer.py from the repo as a subprocess instead
-    # of the built-in transformers path. This is the most accurate and fastest
-    # inference method as it uses the official YuE pipeline directly.
+    # Path to a cloned https://github.com/multimodal-art-projection/YuE repo root.
+    # When set together with yue_model_path, the worker runs inference/infer.py
+    # (official pipeline). Install YuE env + xcodec_mini_infer per upstream README.
     # Example: /root/YuE
     # Leave blank to use the built-in transformers inference path.
     yue_repo_path: str = ""
+    # Arguments passed to official infer.py (see YuE README).
+    yue_native_stage2_model: str = "m-a-p/YuE-s2-1B-general"
+    yue_native_run_n_segments: int = 2
+    yue_native_stage2_batch_size: int = 4
+    # Directory whose *child* is ``models/`` (infer.py: ``from models...``).
+    # Default: YuE/inference/xcodec_mini_infer after ``git clone m-a-p/xcodec_mini_infer``.
+    # If the codec lives elsewhere (e.g. research repo /root/xcodec), set this path.
+    yue_native_xcodec_mini_path: str = ""
+    # Passed to native infer.py subprocess (Transformers). Use ``sdpa`` when
+    # flash-attn is not installed (avoids ImportError on FlashAttention2).
+    # Empty = do not set (checkpoint may request flash_attention_2).
+    yue_native_attn_implementation: str = "sdpa"
 
     # ── Architecture / backend overrides ─────────────────────────────────────
     # Set to true if the checkpoint requires custom code (e.g. HKUSTAudio/YuE).

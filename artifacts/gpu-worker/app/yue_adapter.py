@@ -14,7 +14,8 @@ Two inference paths are supported, selected by YUE_REPO_PATH:
     Critical correctness notes for this path:
       • text_vocab_size MUST be the BASE Llama-2 vocab (32 000), NOT
         tokenizer.vocab_size which returns the full extended vocab (83 734).
-        Audio tokens occupy IDs [32000, 83734) in YuE's unified vocabulary.
+        Audio xcodec tokens use mm v0.2 ranges (e.g. 45334+), not (id - 32000);
+        see yue_mm_xcodec_global_offset in config / codecmanipulator.py.
       • max_new_tokens is capped at model.config.max_position_embeddings
         minus the prompt length.  Exceeding this causes context overflow,
         ~14-minute generation times, and empty audio output.
@@ -35,8 +36,11 @@ Pass yue_hf_token for gated repos.
 from __future__ import annotations
 
 import logging
+import re
+import traceback
 import os
 import random
+import sys
 import shutil
 import struct
 import subprocess
@@ -173,6 +177,10 @@ def load_codec(
     codec_path: str,
     device: Any,
     hf_token: str = "",
+    n_codebooks: int = 8,
+    sample_rate: int = 24000,
+    codec_samples_per_frame: int = 0,
+    xcodec_tokens_fps: int = 50,
 ) -> Optional[Any]:
     """
     Load the xcodec_mini_infer audio codec used to decode YuE audio tokens to waveforms.
@@ -190,10 +198,10 @@ def load_codec(
          architecture" errors.  Falls back to manual JSON config + weight
          loading if from_pretrained itself raises an exception.
 
-      2. AutoModel with trust_remote_code + explicit CPU device_map (primary
+      2. AutoModel with trust_remote_code + low_cpu_mem_usage=False (primary
          path for HF repo ids such as 'm-a-p/xcodec_mini_infer').
-         Passing device_map={"": "cpu"} prevents the meta-device path.
-         The codec is moved to the target device after loading.
+         Avoids meta tensors without requiring a working ``accelerate`` for
+         ``device_map``.  The codec is moved to the target device after loading.
 
       3. xcodec2 pip package (legacy; pip install xcodec2).
          Kept for compatibility with old local xcodec2 checkpoints.
@@ -230,7 +238,14 @@ def load_codec(
         #      FileNotFoundError is raised (not logged) when layout doesn't match,
         #      so we silently skip to 1b.
         try:
-            codec = _try_xcodec_local_repo(codec_path, device)
+            codec = _try_xcodec_local_repo(
+                codec_path,
+                device,
+                n_codebooks=n_codebooks,
+                sample_rate=sample_rate,
+                codec_samples_per_frame=codec_samples_per_frame,
+                xcodec_tokens_fps=xcodec_tokens_fps,
+            )
             logger.info("Audio codec loaded via xcodec repo loader | device=%s", device)
             return codec
         except FileNotFoundError:
@@ -294,6 +309,13 @@ def detect_codec_n_quantizers(codec: Any) -> Optional[int]:
     Inspect a loaded xcodec-family codec and return the actual number of
     RVQ/FSQ/VQ quantizer stages it uses.
 
+    For :class:`_XCodecRepoWrapper` (m-a-p research ``SoundStream`` + ``final_ckpt``),
+    ``quantizer.n_q`` / codebook depth can be **12** while the YuE causal LM still
+    emits **8** interleaved codebook indices per frame (xcodec_mini_infer + YuE).
+    Using 12 for reshape corrupts indices and triggers CUDA ``indexSelect`` asserts
+    inside ``decode``.  In that case return ``None`` so callers keep
+    ``yue_codec_n_codebooks`` (default 8).
+
     Structural paths searched (in priority order):
 
       xcodec_mini_infer (m-a-p) — RVQ layout:
@@ -309,6 +331,9 @@ def detect_codec_n_quantizers(codec: Any) -> Optional[int]:
     Returns None when the structure cannot be determined so callers fall
     back gracefully to the configured yue_codec_n_codebooks value.
     """
+    if type(codec).__name__ == "_XCodecRepoWrapper":
+        return None
+
     def _n_from_quantizer(q_obj: Any) -> Optional[int]:
         """Extract n_quantizers from any quantizer-like object."""
         if q_obj is None:
@@ -546,6 +571,61 @@ def _load_codec_manual_weights(codec_path: str, device: Any) -> Any:
             sys.path.remove(codec_dir)
 
 
+def _probe_soundstream_samples_per_frame(
+    model: Any, device: Any, n_codebooks: int
+) -> Optional[int]:
+    """
+    Empirical audio samples per codec frame for SoundStream.decode(codes)
+    with codes shaped (K, 1, T). m-a-p xcodec SoundStream uses ~320 @ 24 kHz,
+    not 24000/50=480 — using 50 Hz for caps therefore yields ~6.7 s for a 10 s
+    request.
+    """
+    import torch
+
+    if n_codebooks < 1:
+        return None
+    try:
+        T = 64
+        codes = torch.zeros(n_codebooks, 1, T, dtype=torch.long, device=device)
+        with torch.no_grad():
+            out = model.decode(codes)
+        if isinstance(out, (tuple, list)):
+            out = out[0]
+        if not hasattr(out, "shape") or out.dim() < 1:
+            return None
+        n = int(out.shape[-1])
+        if n <= 0:
+            return None
+        spf = max(1, n // T)
+        # Loose bounds for 16–48 kHz neural codecs
+        if spf < 64 or spf > 4096:
+            logger.debug("SoundStream probe: samples/frame=%d out of range, skip.", spf)
+            return None
+        return spf
+    except Exception as exc:
+        logger.debug("SoundStream samples/frame probe failed: %s", exc)
+        return None
+
+
+def _codec_effective_frames_per_sec(
+    codec: Optional[Any],
+    sample_rate: int,
+    fallback_fps: int,
+) -> float:
+    """
+    Frames per second of audio for duration math (ideal token count, caps).
+
+    For :class:`_XCodecRepoWrapper`, use probed ``_samples_per_frame`` when set:
+    fps = sample_rate / samples_per_frame.  Otherwise use ``fallback_fps``
+    (config ``yue_xcodec_tokens_fps``).
+    """
+    if codec is not None and type(codec).__name__ == "_XCodecRepoWrapper":
+        spf = getattr(codec, "_samples_per_frame", None)
+        if isinstance(spf, int) and spf > 0:
+            return float(sample_rate) / float(spf)
+    return float(max(1, fallback_fps))
+
+
 class _XCodecRepoWrapper:
     """
     Thin wrapper around the original m-a-p/xcodec SoundStream model.
@@ -560,8 +640,42 @@ class _XCodecRepoWrapper:
       3. model.quantizer.decode(codes) → decoder     — alt two-step API
     """
 
-    def __init__(self, model: Any) -> None:
+    def __init__(
+        self,
+        model: Any,
+        *,
+        n_codebooks: int = 8,
+        sample_rate: int = 24000,
+        codec_samples_per_frame: int = 0,
+        xcodec_tokens_fps: int = 50,
+    ) -> None:
         self._model = model
+        self._samples_per_frame: Optional[int] = None
+        if codec_samples_per_frame > 0:
+            self._samples_per_frame = int(codec_samples_per_frame)
+            logger.info(
+                "SoundStream | samples_per_frame=%d (from config) | ~%.1f frames/s @ %d Hz",
+                self._samples_per_frame,
+                sample_rate / self._samples_per_frame,
+                sample_rate,
+            )
+        else:
+            dev = next(model.parameters()).device
+            spf = _probe_soundstream_samples_per_frame(model, dev, n_codebooks)
+            if spf is not None:
+                self._samples_per_frame = spf
+                logger.info(
+                    "SoundStream probe | samples_per_frame=%d | ~%.1f codec frames/s @ %d Hz",
+                    spf,
+                    sample_rate / spf,
+                    sample_rate,
+                )
+            else:
+                logger.info(
+                    "SoundStream probe failed — duration math falls back to "
+                    "yue_xcodec_tokens_fps=%d",
+                    max(1, xcodec_tokens_fps),
+                )
 
     # ── Primary interface ──────────────────────────────────────────────────
 
@@ -575,12 +689,38 @@ class _XCodecRepoWrapper:
         """
         import torch
         with torch.no_grad():
-            # ── Step 1 (primary): dequantize then decode ───────────────────
-            # SoundStream architecture: codes → quantizer.from_codes → embeddings
-            # → decoder/decode → waveform
+            # ── Step 0: m-a-p SoundStream — decode(codes) is the intended API
+            # (quantizer.decode + fc_post2 + decoder_2 inside).  Do not run the
+            # generic two-step path first: SoundStream has decoder_2, not decoder,
+            # and decode(embeddings) is not the same as decode(discrete codes).
+            if hasattr(self._model, "decode") and callable(self._model.decode):
+                try:
+                    # YuE infer.py passes (K, 1, T), not (1, K, T):
+                    #   x.unsqueeze(0).permute(1, 0, 2) on (K, T) → (K, 1, T).
+                    # Feeding (1, K, T) makes the quantizer treat layout wrong → noise.
+                    dc = codes
+                    if (
+                        dc.dim() == 3
+                        and dc.shape[0] == 1
+                        and dc.shape[1] > 1
+                    ):
+                        dc = dc.permute(1, 0, 2).contiguous()
+                        logger.debug(
+                            "SoundStream.decode: permuted codes (1,K,T)→(K,1,T) | shape=%s",
+                            list(dc.shape),
+                        )
+                    out = self._model.decode(dc)
+                    if isinstance(out, (tuple, list)):
+                        return out[0]
+                    return out
+                except Exception as e:
+                    logger.debug("SoundStream.decode(codes) failed: %s", e)
+
+            # ── Step 1: generic dequantize then decode ─────────────────────
             quant = getattr(self._model, "quantizer", None)
             dec_fn = (
                 getattr(self._model, "decoder", None)
+                or getattr(self._model, "decoder_2", None)
                 or getattr(self._model, "decode", None)
             )
             if quant is not None and dec_fn is not None:
@@ -601,17 +741,6 @@ class _XCodecRepoWrapper:
                             dequant_name, e,
                         )
                         continue
-
-            # ── Step 2 (fallback): model.decode(codes) ────────────────────
-            # For models that combine quantization + decoding in one call.
-            if hasattr(self._model, "decode"):
-                try:
-                    out = self._model.decode(codes)
-                    if isinstance(out, (tuple, list)):
-                        return out[0]
-                    return out
-                except Exception as e:
-                    logger.debug("SoundStream.decode(codes) failed: %s", e)
 
         raise RuntimeError(
             "SoundStream model does not expose a usable decode API. "
@@ -666,7 +795,123 @@ def _resolve_codec_paths(obj: Any, codec_dir: str) -> Any:
     return obj
 
 
-def _try_xcodec_local_repo(codec_path: str, device: Any) -> "_XCodecRepoWrapper":
+def _maybe_load_hubert_for_semantic_path(
+    resolved_path: str,
+    **kwargs: Any,
+) -> Any | None:
+    """
+    xcodec's SoundStream uses AutoModel.from_pretrained on a Hubert snapshot.
+    AutoModel dispatch can hit edge cases (NoneType.device) after loading YuE
+    with low_cpu_mem_usage=True; loading HubertModel explicitly is more stable.
+    """
+    norm = resolved_path.replace("\\", "/")
+    if "semantic_ckpts" not in norm:
+        return None
+    cfg_json = os.path.join(resolved_path, "config.json")
+    if not os.path.isfile(cfg_json):
+        return None
+    try:
+        import json
+
+        with open(cfg_json, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except OSError:
+        return None
+    mt = (cfg.get("model_type") or "").lower()
+    archs = cfg.get("architectures") or []
+    if mt != "hubert" and not any("hubert" in str(a).lower() for a in archs):
+        return None
+    from transformers import HubertModel
+
+    logger.debug(
+        "Using HubertModel.from_pretrained for semantic path (not AutoModel): %s",
+        resolved_path,
+    )
+    load_kw = dict(kwargs)
+    # Prefer safetensors when present — recent transformers refuses torch.load(.bin)
+    # on PyTorch < 2.6 (CVE-2025-32434); safetensors are exempt.
+    if any(Path(resolved_path).glob("*.safetensors")):
+        load_kw["use_safetensors"] = True
+    try:
+        return HubertModel.from_pretrained(resolved_path, **load_kw)
+    except ValueError as exc:
+        msg = str(exc)
+        if "CVE-2025-32434" in msg or (
+            "torch.load" in msg and "2.6" in msg
+        ):
+            raise RuntimeError(
+                "Semantic Hubert checkpoint uses pytorch_model.bin; your transformers "
+                "refuses torch.load on PyTorch < 2.6 (CVE-2025-32434). "
+                "Fix one of: (1) pip install 'torch>=2.6' + matching torchaudio using your "
+                "CUDA wheel index; (2) convert semantic_ckpts/hf_1_325000 to "
+                "model.safetensors (huggingface.co docs / safetensors convert); "
+                "(3) pin an older transformers that does not enforce this (not recommended). "
+                f"Path: {resolved_path}"
+            ) from exc
+        raise
+
+
+def _patch_automodel_from_pretrained_xcodec_paths(codec_dir: str) -> Any:
+    """
+    m-a-p/xcodec_mini_infer's SoundStream hardcodes::
+
+        AutoModel.from_pretrained("./xcodec_mini_infer/semantic_ckpts/hf_1_325000")
+
+    That path is relative to YuE's inference/ layout, not to YUE_CODEC_PATH.
+    Rewrite those strings to absolute paths under codec_dir for the duration
+    of SoundStream construction, then restore the original method.
+
+    Loads Hubert with ``torch_dtype=float32`` and ``low_cpu_mem_usage=False``.
+    We intentionally avoid ``device_map`` here: it requires a working
+    ``accelerate`` install that ``transformers`` accepts
+    (``is_accelerate_available()``), which can disagree with
+    ``importlib.util.find_spec("accelerate")`` (broken/partial venv, version skew).
+    ``low_cpu_mem_usage=False`` avoids meta tensors and does not need accelerate.
+    Without this, loading YuE with ``low_cpu_mem_usage=True`` can leave meta state
+    such that nested Hubert load raises ``'NoneType' object has no attribute 'device'``.
+    """
+    import torch
+    from transformers import AutoModel
+
+    _orig = AutoModel.from_pretrained
+
+    def _wrapped(pretrained_model_name_or_path: Any, *args: Any, **kwargs: Any) -> Any:
+        p = pretrained_model_name_or_path
+        if isinstance(p, str):
+            for prefix in ("./xcodec_mini_infer/", "xcodec_mini_infer/"):
+                if p.startswith(prefix):
+                    rel = p[len(prefix) :].lstrip("/")
+                    resolved = os.path.join(codec_dir, rel)
+                    logger.debug(
+                        "AutoModel.from_pretrained rewrite: %s → %s", p, resolved
+                    )
+                    p = resolved
+                    break
+        # Avoid meta-device / None .device bugs when SoundStream loads Hubert
+        # right after the YuE causal LM (see _load_codec docstring + _try_automodel_cpu).
+        kwargs.setdefault("torch_dtype", torch.float32)
+        kwargs.setdefault("low_cpu_mem_usage", False)
+        if isinstance(p, str) and os.path.isdir(os.path.expanduser(p)):
+            kwargs.setdefault("local_files_only", True)
+        if isinstance(p, str):
+            hubert = _maybe_load_hubert_for_semantic_path(p, **kwargs)
+            if hubert is not None:
+                return hubert
+        return _orig(p, *args, **kwargs)
+
+    AutoModel.from_pretrained = _wrapped  # type: ignore[method-assign]
+    return _orig
+
+
+def _try_xcodec_local_repo(
+    codec_path: str,
+    device: Any,
+    *,
+    n_codebooks: int = 8,
+    sample_rate: int = 24000,
+    codec_samples_per_frame: int = 0,
+    xcodec_tokens_fps: int = 50,
+) -> "_XCodecRepoWrapper":
     """
     Load xcodec_mini_infer from its research repository directory.
 
@@ -779,13 +1024,34 @@ def _try_xcodec_local_repo(codec_path: str, device: Any) -> "_XCodecRepoWrapper"
             f"(available: {[n for n in dir(_mod) if not n.startswith('_')]})"
         )
 
+    # SoundStream.__init__ calls AutoModel.from_pretrained on a hardcoded
+    # ./xcodec_mini_infer/... path (not present in generator.config).
+    _reset_default_device()
+    _orig_from_pretrained = _patch_automodel_from_pretrained_xcodec_paths(codec_dir)
     try:
-        codec_model = cls(**gen_cfg)
+        # YuE LM load can leave torch default device as meta; force CPU for
+        # dac/Hubert submodules created during SoundStream.__init__.
+        if hasattr(torch, "set_default_device"):
+            torch.set_default_device("cpu")
+            try:
+                codec_model = cls(**gen_cfg)
+            finally:
+                torch.set_default_device(None)
+        else:
+            codec_model = cls(**gen_cfg)
     except Exception as exc:
+        logger.debug(
+            "SoundStream construction failed (full traceback):\n%s",
+            traceback.format_exc(),
+        )
         raise RuntimeError(
             f"Failed to instantiate {generator_name}(**generator.config): {exc}\n"
             f"  config keys: {list(gen_cfg.keys())}"
         ) from exc
+    finally:
+        from transformers import AutoModel as _AM
+
+        _AM.from_pretrained = _orig_from_pretrained  # type: ignore[method-assign]
 
     # ── Load checkpoint weights ────────────────────────────────────────────
     # infer.py: parameter_dict = torch.load(resume_path, ...)
@@ -820,7 +1086,13 @@ def _try_xcodec_local_repo(codec_path: str, device: Any) -> "_XCodecRepoWrapper"
         "xcodec repo loaded | cls=%s | ckpt=%s | device=%s",
         generator_name, ckpt_file.name, device,
     )
-    return _XCodecRepoWrapper(codec_model)
+    return _XCodecRepoWrapper(
+        codec_model,
+        n_codebooks=n_codebooks,
+        sample_rate=sample_rate,
+        codec_samples_per_frame=codec_samples_per_frame,
+        xcodec_tokens_fps=xcodec_tokens_fps,
+    )
 
 
 def _try_xcodec2_pkg(codec_path: str, token: Optional[str]) -> Any:
@@ -852,12 +1124,13 @@ def _try_xcodec2_pkg(codec_path: str, token: Optional[str]) -> Any:
 def _try_automodel_cpu(codec_path: str, token: Optional[str]) -> Any:
     import torch
     from transformers import AutoModel
+
     return AutoModel.from_pretrained(
         codec_path,
         trust_remote_code=True,
         token=token,
         torch_dtype=torch.float32,
-        device_map={"": "cpu"},
+        low_cpu_mem_usage=False,
     )
 
 
@@ -878,6 +1151,17 @@ def run_yue_inference(
     num_steps: int,
     yue_repo_path: str = "",
     yue_model_path: str = "",
+    yue_native_stage2_model: str = "m-a-p/YuE-s2-1B-general",
+    yue_native_run_n_segments: int = 2,
+    yue_native_stage2_batch_size: int = 4,
+    yue_native_xcodec_mini_path: str = "",
+    yue_native_attn_implementation: str = "sdpa",
+    mm_xcodec_global_offset: int = 45334,
+    mm_xcodec_codebook_size: int = 1024,
+    xcodec_tokens_fps: int = 50,
+    mm_budget_multiplier: float = 1.45,
+    trim_waveform_to_request_duration: bool = True,
+    mm_cap_window: str = "tail",
 ) -> None:
     """
     Blocking inference dispatcher — called inside a ThreadPoolExecutor.
@@ -892,6 +1176,12 @@ def run_yue_inference(
                 output_path=output_path,
                 repo_path=yue_repo_path,
                 model_path=yue_model_path,
+                stage2_model=yue_native_stage2_model,
+                run_n_segments=yue_native_run_n_segments,
+                stage2_batch_size=yue_native_stage2_batch_size,
+                xcodec_mini_path=yue_native_xcodec_mini_path,
+                attn_implementation=yue_native_attn_implementation,
+                trim_waveform_to_request_duration=trim_waveform_to_request_duration,
             )
             return
         except Exception as exc:
@@ -913,6 +1203,12 @@ def run_yue_inference(
             n_codebooks=n_codebooks,
             text_vocab_size=text_vocab_size,
             sample_rate=sample_rate,
+            mm_xcodec_global_offset=mm_xcodec_global_offset,
+            mm_xcodec_codebook_size=mm_xcodec_codebook_size,
+            xcodec_tokens_fps=xcodec_tokens_fps,
+            mm_budget_multiplier=mm_budget_multiplier,
+            trim_waveform_to_request_duration=trim_waveform_to_request_duration,
+            mm_cap_window=mm_cap_window,
         )
     elif family == "seq2seq":
         _run_seq2seq_inference(
@@ -931,11 +1227,200 @@ def run_yue_inference(
 
 # ─── Path A: Native YuE subprocess ───────────────────────────────────────────
 
+def _yu_infer_pythonpath_entries(
+    infer_script: Path,
+    xcodec_mini_override: str = "",
+) -> list[str]:
+    """
+    infer.py does ``from models.soundstream_hubert_new import SoundStream``.
+    The xcodec repo root (parent of the ``models/`` package) must appear **before**
+    ``…/inference`` on PYTHONPATH: otherwise a conflicting ``models`` name under
+    ``inference/`` can make Python treat ``models`` as a non-package and raise
+    ``'models' is not a package``.
+    """
+    infer_dir = infer_script.parent.resolve()
+    roots: list[Path] = []
+    if xcodec_mini_override.strip():
+        roots.append(Path(xcodec_mini_override.strip()).expanduser().resolve())
+    roots.append(infer_dir / "xcodec_mini_infer")
+
+    head: list[str] = []
+    for root in roots:
+        if not root.is_dir() or not (root / "models").is_dir():
+            continue
+        head.append(str(root))
+        dac = root / "descriptaudiocodec"
+        if dac.is_dir():
+            head.append(str(dac))
+        break
+
+    # xcodec first, then inference (codecmanipulator, mmtokenizer, etc.).
+    merged = head + [str(infer_dir)]
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in merged:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def _yu_infer_codec_cli_args(xcodec_root: str) -> list[str]:
+    """
+    infer.py defaults assume ``YuE/inference/xcodec_mini_infer/...``.
+    When the codec lives elsewhere (e.g. /root/xcodec), pass explicit paths.
+    """
+    root = Path(xcodec_root.strip()).expanduser().resolve()
+    if not root.is_dir():
+        return []
+    cfg = root / "final_ckpt" / "config.yaml"
+    if not cfg.is_file():
+        logger.warning(
+            "YuE native: missing codec config %s — clone xcodec under inference/ "
+            "or set YUE_NATIVE_XCODEC_MINI_PATH to a tree with final_ckpt/config.yaml",
+            cfg,
+        )
+        return []
+
+    ckpt_dir = root / "final_ckpt"
+    resume = ckpt_dir / "ckpt_00360000.pth"
+    if not resume.is_file():
+        ckpts = sorted(ckpt_dir.glob("ckpt_*.pth"))
+        if ckpts:
+            resume = ckpts[-1]
+
+    dec_cfg = root / "decoders" / "config.yaml"
+    voc = root / "decoders" / "decoder_131000.pth"
+    ins = root / "decoders" / "decoder_151000.pth"
+
+    cmd: list[str] = ["--basic_model_config", str(cfg)]
+    if resume.is_file():
+        cmd += ["--resume_path", str(resume)]
+    if dec_cfg.is_file():
+        cmd += ["--config_path", str(dec_cfg)]
+    if voc.is_file():
+        cmd += ["--vocal_decoder_path", str(voc)]
+    if ins.is_file():
+        cmd += ["--inst_decoder_path", str(ins)]
+    logger.info(
+        "YuE native infer codec CLI | root=%s | basic_model_config=%s | resume=%s",
+        root,
+        cfg.name,
+        resume.name if resume.is_file() else "n/a",
+    )
+    return cmd
+
+
+def _ensure_yue_infer_min_tagged_segments(lyrics: str, *, min_segments: int = 2) -> str:
+    """
+    YuE ``inference/infer.py`` uses the same regex as ``split_lyrics()``::
+
+        run_n_segments = min(args.run_n_segments + 1, len(lyrics))
+
+    where ``lyrics`` is the list of ``[tag]`` blocks. The Stage1 loop skips
+    ``i == 0`` (``continue``). If there are fewer than two tagged segments,
+    ``run_n_segments`` can be 1, only ``i == 0`` runs, and ``raw_output`` is
+    never set — ``NameError: raw_output is not defined`` at the end of Stage1.
+
+    Ensure at least ``min_segments`` blocks so iteration reaches ``i == 1``.
+    """
+    pattern = r"\[(\w+)\](.*?)(?=\[|\Z)"
+    segments = re.findall(pattern, lyrics, re.DOTALL)
+    if len(segments) >= min_segments:
+        return lyrics
+    body = lyrics.strip()
+    if not body:
+        body = "La la la"
+    if len(segments) == 0:
+        padded = f"[verse]\n{body}\n\n[chorus]\n{body}\n"
+    else:
+        tag, content = segments[0][0], segments[0][1].strip()
+        padded = f"[{tag}]\n{content}\n\n[chorus]\n{content}\n"
+    logger.info(
+        "YuE native: lyrics had %d tagged segment(s); padded to ≥%d for infer.py",
+        len(segments),
+        min_segments,
+    )
+    return padded
+
+
+def _find_native_yue_infer_output(out_dir: Path) -> Path:
+    """
+    Official infer.py may write WAV or (after vocoder) ``vocoder/mix/*_mixed.mp3``.
+    Prefer the final mix, then any WAV, then any MP3.
+    """
+    mixed = sorted(out_dir.rglob("*_mixed.mp3"))
+    if mixed:
+        parts_vocoder_mix = [
+            p
+            for p in mixed
+            if "vocoder" in {x.lower() for x in p.parts}
+            and "mix" in {x.lower() for x in p.parts}
+        ]
+        return (parts_vocoder_mix or mixed)[0]
+    wavs = sorted(out_dir.rglob("*.wav"))
+    if wavs:
+        return wavs[0]
+    mp3s = sorted(out_dir.rglob("*.mp3"))
+    if mp3s:
+        return mp3s[0]
+    raise FileNotFoundError(str(out_dir))
+
+
+def _finalize_native_yue_output_to_wav(src: Path, dest_wav: Path) -> None:
+    """Move WAV as-is, or decode MP3 and write PCM WAV (API serves ``{job_id}.wav``)."""
+    dest_wav.parent.mkdir(parents=True, exist_ok=True)
+    suf = src.suffix.lower()
+    if suf == ".wav":
+        shutil.move(str(src), str(dest_wav))
+        return
+    if suf == ".mp3":
+        import torchaudio
+
+        wav, sr = torchaudio.load(str(src))
+        _save_waveform(wav, dest_wav, int(sr))
+        return
+    raise RuntimeError(f"Unsupported native YuE output type: {src}")
+
+
+def _trim_native_output_wav_to_request_duration(
+    output_path: Path,
+    duration_sec: int,
+    *,
+    do_trim: bool,
+) -> None:
+    """
+    ``infer.py`` does not honor API ``duration_sec``; it emits full segments
+    (e.g. verse + chorus ≈ 3× the requested length). Match the built-in causal
+    path: re-load the saved WAV and truncate to ``duration_sec`` × sample_rate.
+    """
+    if not do_trim or duration_sec <= 0:
+        return
+    import torchaudio
+
+    wav, sr = torchaudio.load(str(output_path))
+    trimmed = _trim_waveform_to_duration_sec(wav, float(duration_sec), int(sr))
+    if trimmed is wav:
+        return
+    _save_waveform(trimmed, output_path, int(sr))
+    logger.debug(
+        "Native YuE: trimmed WAV to requested %ds (sample_rate=%d)",
+        duration_sec,
+        int(sr),
+    )
+
+
 def _run_yue_subprocess(
     body: "GenerateRequest",
     output_path: Path,
     repo_path: str,
     model_path: str,
+    stage2_model: str = "m-a-p/YuE-s2-1B-general",
+    run_n_segments: int = 2,
+    stage2_batch_size: int = 4,
+    xcodec_mini_path: str = "",
+    attn_implementation: str = "sdpa",
+    trim_waveform_to_request_duration: bool = True,
 ) -> None:
     """
     Call the official HKUSTAudio/YuE infer.py as a subprocess.
@@ -944,10 +1429,16 @@ def _run_yue_subprocess(
     codec, prompt format, and token budget correctly by delegating entirely
     to the official pipeline.
 
-    Output: the generated WAV is moved to output_path.
+    Output: the generated audio (WAV from infer, or mixed MP3 from vocoder) is
+    written to ``output_path`` as WAV.
     """
     repo = Path(repo_path)
     infer_script = _find_infer_script(repo)
+    logger.info(
+        "Native YuE | using your clone | repo=%s | infer=%s",
+        repo_path,
+        infer_script,
+    )
 
     genre_prompt = _build_genre_prompt(body.style_preset, body.prompt)
 
@@ -959,7 +1450,10 @@ def _run_yue_subprocess(
         out_dir.mkdir()
 
         genre_file.write_text(genre_prompt, encoding="utf-8")
-        lyrics_file.write_text(body.lyrics, encoding="utf-8")
+        lyrics_file.write_text(
+            _ensure_yue_infer_min_tagged_segments(body.lyrics),
+            encoding="utf-8",
+        )
 
         cmd = _build_infer_cmd(
             script=infer_script,
@@ -969,6 +1463,10 @@ def _run_yue_subprocess(
             out_dir=out_dir,
             duration_sec=body.duration_sec,
             seed=body.seed,
+            stage2_model=stage2_model,
+            run_n_segments=run_n_segments,
+            stage2_batch_size=stage2_batch_size,
+            xcodec_mini_root=xcodec_mini_path,
         )
 
         logger.info(
@@ -977,9 +1475,61 @@ def _run_yue_subprocess(
         )
 
         env = {**os.environ}
+        our_pp = _yu_infer_pythonpath_entries(infer_script, xcodec_mini_path)
+        prev = env.get("PYTHONPATH", "").strip()
+        pparts = our_pp + ([prev] if prev else [])
+        env["PYTHONPATH"] = os.pathsep.join(pparts)
+        logger.debug("Native YuE PYTHONPATH=%s", env["PYTHONPATH"])
+
+        infer_dir_s = str(infer_script.parent.resolve())
+        _prefix = os.pathsep.join(
+            p for p in our_pp
+            if os.path.normpath(p) != os.path.normpath(infer_dir_s)
+        )
+        env["YUE_INFER_SYS_PATH_PREFIX"] = _prefix
+        logger.debug("Native YuE YUE_INFER_SYS_PATH_PREFIX=%s", _prefix)
+
+        _codec_root = ""
+        if xcodec_mini_path.strip():
+            _codec_root = str(
+                Path(xcodec_mini_path.strip()).expanduser().resolve()
+            )
+        else:
+            for _p in our_pp:
+                _pp = Path(_p)
+                if (_pp / "models" / "soundstream_hubert_new.py").is_file():
+                    _codec_root = str(_pp.resolve())
+                    break
+        if _codec_root:
+            env["YUE_INFER_CODEC_ROOT"] = _codec_root
+            logger.debug("Native YuE YUE_INFER_CODEC_ROOT=%s", _codec_root)
+
+        _attn = (attn_implementation or "").strip()
+        if _attn:
+            # infer.py does not pass attn_implementation; env alone is ignored for HF load.
+            # app/yue_infer_launcher.py patches from_pretrained and reads this:
+            env["YUE_INFER_ATTN_IMPLEMENTATION"] = _attn
+            env["TRANSFORMERS_ATTENTION_IMPLEMENTATION"] = _attn
+            env["HF_ATTENTION_IMPLEMENTATION"] = _attn
+            logger.debug(
+                "Native YuE attention | YUE_INFER_ATTN_IMPLEMENTATION=%s",
+                _attn,
+            )
+
+        if not any(
+            (Path(p) / "models" / "soundstream_hubert_new.py").is_file()
+            for p in our_pp
+        ):
+            logger.warning(
+                "YuE infer: models/soundstream_hubert_new.py not found on PYTHONPATH. "
+                "Run: cd %s && git clone https://huggingface.co/m-a-p/xcodec_mini_infer "
+                "or set YUE_NATIVE_XCODEC_MINI_PATH=/path/to/xcodec (tree with models/).",
+                infer_script.parent,
+            )
+
         result = subprocess.run(
             cmd,
-            cwd=str(repo),
+            cwd=str(infer_script.parent),
             env=env,
             capture_output=True,
             text=True,
@@ -993,18 +1543,25 @@ def _run_yue_subprocess(
                 f"STDERR: {result.stderr[-2000:]}"
             )
 
-        # Find the generated WAV and move it to output_path
-        wavs = list(out_dir.rglob("*.wav"))
-        if not wavs:
+        try:
+            produced = _find_native_yue_infer_output(out_dir)
+        except FileNotFoundError:
             raise RuntimeError(
-                f"infer.py exited 0 but no WAV found under {out_dir}.\n"
+                f"infer.py exited 0 but no WAV/MP3 found under {out_dir}.\n"
                 f"STDOUT: {result.stdout[-1000:]}"
-            )
+            ) from None
 
-        shutil.move(str(wavs[0]), str(output_path))
+        _finalize_native_yue_output_to_wav(produced, output_path)
+        _trim_native_output_wav_to_request_duration(
+            output_path,
+            body.duration_sec,
+            do_trim=trim_waveform_to_request_duration,
+        )
         logger.info(
-            "Native YuE subprocess complete | job=%s | wav=%s | size=%d bytes",
-            body.job_id, wavs[0].name, output_path.stat().st_size,
+            "Native YuE subprocess complete | job=%s | src=%s | size=%d bytes",
+            body.job_id,
+            produced.name,
+            output_path.stat().st_size,
         )
 
 
@@ -1012,6 +1569,7 @@ def _find_infer_script(repo: Path) -> Path:
     """Locate the YuE inference entry-point within the cloned repo."""
     candidates = [
         repo / "infer.py",
+        repo / "inference" / "infer.py",  # multimodal-art-projection/YuE layout
         repo / "inference.py",
         repo / "src" / "infer.py",
         repo / "yue" / "infer.py",
@@ -1022,7 +1580,8 @@ def _find_infer_script(repo: Path) -> Path:
     raise RuntimeError(
         f"Cannot find infer.py in YUE_REPO_PATH='{repo}'. "
         f"Searched: {[str(c) for c in candidates]}. "
-        f"Ensure YUE_REPO_PATH points to the root of the cloned HKUSTAudio/YuE repository."
+        f"Clone https://github.com/multimodal-art-projection/YuE and set YUE_REPO_PATH "
+        f"to the repository root (the script lives in inference/infer.py)."
     )
 
 
@@ -1034,29 +1593,42 @@ def _build_infer_cmd(
     out_dir: Path,
     duration_sec: int,
     seed: Optional[int],
+    stage2_model: str = "m-a-p/YuE-s2-1B-general",
+    run_n_segments: int = 2,
+    stage2_batch_size: int = 4,
+    xcodec_mini_root: str = "",
 ) -> list:
     """
-    Build the subprocess command for the official YuE infer.py.
+    Build the subprocess command for the official YuE infer.py
+    (multimodal-art-projection/YuE ``inference/infer.py``).
 
-    The YuE repo has evolved over multiple versions with different argument
-    names.  We cover the two most common CLI patterns and let the subprocess
-    fail with a clear error if neither matches.
+    Do not pass flags this argparse does not define — e.g. ``--model_name_or_path``
+    causes exit code 2 (unrecognized arguments).
     """
+    # README default is 3000; scale with requested duration, cap at 3000.
+    max_new_tok = min(3000, max(1000, int(duration_sec * 300)))
+    launcher = Path(__file__).resolve().parent / "yue_infer_launcher.py"
+    if not launcher.is_file():
+        raise RuntimeError(f"Native YuE launcher missing: {launcher}")
     cmd = [
-        "python", str(script),
-        # Pattern A (newer YuE versions)
+        sys.executable,
+        str(launcher),
+        str(script),
         "--stage1_model", model_path,
-        # Pattern B fallback names are added as extras; argparse ignores unknowns
-        # only if the script uses parse_known_args — this is common in research code.
-        "--model_name_or_path", model_path,
+        "--stage2_model", stage2_model,
+        "--run_n_segments", str(max(1, run_n_segments)),
+        "--stage2_batch_size", str(max(1, stage2_batch_size)),
         "--genre_txt", str(genre_file),
         "--lyrics_txt", str(lyrics_file),
         "--output_dir", str(out_dir),
-        "--max_new_tokens", str(min(duration_sec * 100, 3000)),
+        "--max_new_tokens", str(max_new_tok),
         "--cuda_idx", "0",
+        "--repetition_penalty", "1.1",
     ]
     if seed is not None:
         cmd += ["--seed", str(seed)]
+    if xcodec_mini_root.strip():
+        cmd += _yu_infer_codec_cli_args(xcodec_mini_root)
     return cmd
 
 
@@ -1072,6 +1644,12 @@ def _run_causal_inference(
     n_codebooks: int,
     text_vocab_size: int,
     sample_rate: int,
+    mm_xcodec_global_offset: int = 45334,
+    mm_xcodec_codebook_size: int = 1024,
+    xcodec_tokens_fps: int = 50,
+    mm_budget_multiplier: float = 1.45,
+    trim_waveform_to_request_duration: bool = True,
+    mm_cap_window: str = "tail",
 ) -> None:
     """
     Built-in causal inference path for YuE-s1-7B-anneal-en-icl.
@@ -1082,12 +1660,16 @@ def _run_causal_inference(
       3. Tokenise (set pad_token=eos_token for Llama tokenizers).
       4. Calculate max_new_tokens respecting the model's context window.
       5. model.generate() → flat sequence of token IDs.
-      6. Extract audio tokens: IDs in [text_vocab_size, full_vocab).
-         CRITICAL: text_vocab_size must be 32000 (Llama-2 base), NOT
-         tokenizer.vocab_size which returns 83734 for YuE.
-      7. Subtract text_vocab_size → raw codec indices.
-      8. Reshape to (1, n_codebooks, seq_len) and decode with xcodec2.
+      6. Extract audio tokens.  For m-a-p SoundStream (_XCodecRepoWrapper) use
+         mm tokenizer v0.2 xcodec range starting at mm_xcodec_global_offset
+         (45334) and per-codebook offsets (see YuE codecmanipulator.py).
+         Legacy path: IDs ≥ text_vocab_size then subtract text_vocab_size.
+      7. Reshape interleaved flat stream to (1, n_codebooks, seq_len) and decode.
       9. Save WAV.
+
+    For production-quality output, prefer native YuE (YUE_REPO_PATH + infer.py);
+    this path is a best-effort single-pass generate() and can sound sparse or
+    unstructured compared to the official two-stage pipeline.
     """
     import torch
 
@@ -1120,24 +1702,36 @@ def _run_causal_inference(
 
     # ── Token budget ──────────────────────────────────────────────────────────
     # Respect the model's hard context window limit.
-    # xcodec2 @ 75 fps × n_codebooks tokens per frame.
+    # For m-a-p SoundStream (xcodec repo), codec frames/s ≠ YuE's nominal 50 Hz;
+    # we use probed samples/frame → fps = sample_rate / spf (see load_codec).
+    _tok_fps = _codec_effective_frames_per_sec(codec, sample_rate, xcodec_tokens_fps)
     model_max_ctx = getattr(model.config, "max_position_embeddings", 16384)
     available = model_max_ctx - prompt_len - 16   # safety margin
-    ideal = body.duration_sec * 75 * n_codebooks  # e.g. 30 s × 75 × 8 = 18 000
-    max_new_tokens = max(1, min(ideal, available))
+    ideal = int(body.duration_sec * _tok_fps * n_codebooks)
+    # Not every generated token is an xcodec mm id; modest headroom only — output
+    # length is capped to requested duration (token cap + waveform trim).
+    use_mm = codec is not None and type(codec).__name__ == "_XCodecRepoWrapper"
+    _mm_mult = max(1.0, float(mm_budget_multiplier))
+    if use_mm:
+        budget = int(ideal * _mm_mult + 256)
+        max_new_tokens = max(1, min(budget, available))
+    else:
+        max_new_tokens = max(1, min(ideal, available))
 
-    if ideal > available:
-        effective_sec = available // (75 * n_codebooks)
+    if (ideal * (_mm_mult if use_mm else 1.0)) > available:
+        _tps = max(1e-6, _tok_fps * n_codebooks)
+        effective_sec = int(available / _tps)
         logger.warning(
-            "Requested %d tokens (%d s) but model context allows only %d tokens "
-            "(~%d s) with a %d-token prompt.  Capping to %d tokens.",
+            "Requested ~%d audio tokens (%d s) but context allows only %d new tokens "
+            "(~%d s audio) with a %d-token prompt.  Capping max_new_tokens to %d.",
             ideal, body.duration_sec, available, effective_sec,
             prompt_len, max_new_tokens,
         )
 
     logger.info(
-        "Token budget | prompt=%d | max_new=%d | ctx_limit=%d | ideal=%d",
-        prompt_len, max_new_tokens, model_max_ctx, ideal,
+        "Token budget | prompt=%d | max_new=%d | ctx_limit=%d | ideal=%d | "
+        "eff_codec_fps=%.2f",
+        prompt_len, max_new_tokens, model_max_ctx, ideal, _tok_fps,
     )
 
     # ── Generate ──────────────────────────────────────────────────────────────
@@ -1156,26 +1750,85 @@ def _run_causal_inference(
     # Strip the prompt prefix; only the newly generated tokens matter.
     new_ids = output_ids[0, prompt_len:]     # shape: (n_generated,)
 
-    # Audio tokens are IDs in [text_vocab_size, full_vocab).
-    # text_vocab_size = 32000 (Llama-2 base), NOT tokenizer.vocab_size (83734).
-    audio_mask = new_ids >= text_vocab_size
-    audio_codes_flat = new_ids[audio_mask] - text_vocab_size
-
-    n_audio = audio_codes_flat.shape[0]
-    logger.info(
-        "Token extraction | generated=%d | audio=%d | text_vocab_size=%d",
-        new_ids.shape[0], n_audio, text_vocab_size,
+    # Audio tokens: YuE mm v0.2 xcodec uses [45334, 45334 + K*1024), not id-32000.
+    use_mm_xcodec = (
+        codec is not None and type(codec).__name__ == "_XCodecRepoWrapper"
     )
+    if use_mm_xcodec:
+        x_hi = mm_xcodec_global_offset + n_codebooks * mm_xcodec_codebook_size
+        mm_mask = (new_ids >= mm_xcodec_global_offset) & (new_ids < x_hi)
+        raw_ids = new_ids[mm_mask].long()
+        n_raw = raw_ids.shape[0]
+        if n_raw == 0:
+            raise RuntimeError(
+                f"No xcodec mm tokens in model output (expected IDs in "
+                f"[{mm_xcodec_global_offset}, {x_hi})). "
+                f"generated={new_ids.shape[0]}. Check YUE_MM_XCODEC_* settings vs "
+                f"YuE inference/codecmanipulator.py."
+            )
+        drop = n_raw % n_codebooks
+        if drop:
+            raw_ids = raw_ids[:-drop]
+        mat = raw_ids.reshape(-1, n_codebooks)
+        offs = torch.arange(
+            n_codebooks,
+            device=mat.device,
+            dtype=mat.dtype,
+        ) * mm_xcodec_codebook_size + mm_xcodec_global_offset
+        local = mat - offs.unsqueeze(0)
+        if (local < 0).any() or (local >= mm_xcodec_codebook_size).any():
+            logger.warning(
+                "Some xcodec token IDs were outside per-codebook range — clamping."
+            )
+            local = local.clamp(0, mm_xcodec_codebook_size - 1)
+        audio_codes_flat = local.reshape(-1)
+        n_audio = audio_codes_flat.shape[0]
+        logger.info(
+            "Token extraction | generated=%d | xcodec_mm_tokens=%d | "
+            "n_codebooks=%d | global_offset=%d",
+            new_ids.shape[0], n_raw, n_codebooks, mm_xcodec_global_offset,
+        )
+    else:
+        audio_mask = new_ids >= text_vocab_size
+        audio_codes_flat = new_ids[audio_mask] - text_vocab_size
+        n_audio = audio_codes_flat.shape[0]
+        logger.info(
+            "Token extraction | generated=%d | audio=%d | text_vocab_size=%d",
+            new_ids.shape[0], n_audio, text_vocab_size,
+        )
 
     if n_audio == 0:
         raise RuntimeError(
             f"No audio codec tokens in model output "
-            f"(generated={new_ids.shape[0]}, all < text_vocab_size={text_vocab_size}).\n"
+            f"(generated={new_ids.shape[0]}).\n"
             f"Possible causes:\n"
-            f"  • YUE_TEXT_VOCAB_SIZE is wrong (check model card for base vocab size).\n"
-            f"  • Prompt format mismatch — model didn't enter audio generation mode.\n"
-            f"  • Set YUE_REPO_PATH to the cloned HKUSTAudio/YuE repo for native inference."
+            f"  • Wrong mm xcodec offset / codebook count (SoundStream path).\n"
+            f"  • YUE_TEXT_VOCAB_SIZE wrong for legacy path.\n"
+            f"  • Set YUE_REPO_PATH for native YuE infer.py."
         )
+
+    # Cap codec tokens to requested duration (avoids 10s UI → 15s WAV).
+    if use_mm_xcodec and body.duration_sec > 0:
+        cap = (ideal // n_codebooks) * n_codebooks
+        if cap > 0 and audio_codes_flat.shape[0] > cap:
+            prev_len = int(audio_codes_flat.shape[0])
+            _win = (mm_cap_window or "tail").strip().lower()
+            if _win == "head":
+                audio_codes_flat = audio_codes_flat[:cap]
+            else:
+                if _win != "tail":
+                    logger.warning(
+                        "Unknown mm_cap_window=%r — using tail", mm_cap_window
+                    )
+                audio_codes_flat = audio_codes_flat[-cap:]
+            n_audio = int(audio_codes_flat.shape[0])
+            logger.info(
+                "Capping flat codec tokens to duration | %d → %d (ideal=%d, window=%s)",
+                prev_len,
+                cap,
+                ideal,
+                "head" if _win == "head" else "tail",
+            )
 
     # ── Codec decode ──────────────────────────────────────────────────────────
     if codec is None:
@@ -1186,6 +1839,10 @@ def _run_causal_inference(
         )
 
     waveform = _decode_with_codec(audio_codes_flat, codec, n_codebooks, device)
+    if trim_waveform_to_request_duration and body.duration_sec > 0:
+        waveform = _trim_waveform_to_duration_sec(
+            waveform, body.duration_sec, sample_rate
+        )
     _save_waveform(waveform, output_path, sample_rate)
     logger.info(
         "Causal inference complete | job=%s | audio_tokens=%d | waveform=%s",
@@ -1205,8 +1862,9 @@ def _decode_with_codec(
     YuE interleaves codebooks in the token stream:
         [t0_cb0, t0_cb1 … t0_cb{N-1}, t1_cb0, t1_cb1 …]
 
-    This function reshapes the flat sequence to (1, n_codebooks, seq_len)
-    and then calls the codec's decode API.
+    Reshapes the flat stream to ``(1, n_codebooks, seq_len)``.  For
+    :class:`_XCodecRepoWrapper`, :meth:`decode_code` permutes to ``(K, 1, T)``
+    before ``SoundStream.decode`` (same as YuE ``infer.py``).
 
     Supported codec APIs (tried in order):
       • codec.decode_code(codes)                  — xcodec_mini_infer and xcodec2
@@ -1339,12 +1997,48 @@ def _format_yue_prompt(genre_prompt: str, lyrics: str) -> str:
     return f"Generate music.\nGenre: {genre_prompt}\n\nLyrics:\n{lyrics}\n"
 
 
+def _trim_waveform_to_duration_sec(
+    waveform: Any, duration_sec: float, sample_rate: int
+) -> Any:
+    """Truncate the last dimension (time) to duration_sec × sample_rate samples."""
+    import torch
+
+    if duration_sec <= 0 or sample_rate <= 0:
+        return waveform
+    n = max(1, int(round(float(duration_sec) * sample_rate)))
+    if not isinstance(waveform, torch.Tensor):
+        return waveform
+    if waveform.dim() < 1:
+        return waveform
+    if waveform.shape[-1] <= n:
+        return waveform
+    return waveform[..., :n]
+
+
+def _normalize_waveform_2d(waveform: Any) -> Any:
+    """
+    torchaudio.save (FFmpeg/torio backend) requires a 2D tensor [channels, time].
+    SoundStream.decode often returns (1, 1, T) or (B, C, T) with B=1.
+    """
+    import torch
+
+    w = waveform.detach().float().cpu().contiguous()
+    while w.dim() > 2:
+        if w.shape[0] == 1:
+            w = w.squeeze(0)
+        else:
+            # e.g. (C, 1, T) → (C, T)
+            w = w.flatten(start_dim=1)
+            break
+    if w.dim() == 1:
+        w = w.unsqueeze(0)
+    if w.dim() != 2:
+        w = w.view(1, -1)
+    return w
+
+
 def _save_waveform(waveform: Any, output_path: Path, sample_rate: int) -> None:
-    if waveform.dim() == 3:
-        waveform = waveform.squeeze(0)
-    if waveform.dim() == 1:
-        waveform = waveform.unsqueeze(0)
-    waveform_cpu = waveform.cpu().float()
+    waveform_cpu = _normalize_waveform_2d(waveform)
     try:
         import torchaudio
         torchaudio.save(str(output_path), waveform_cpu, sample_rate)
@@ -1353,7 +2047,12 @@ def _save_waveform(waveform: Any, output_path: Path, sample_rate: int) -> None:
         pass
     import numpy as np
     import soundfile as sf
-    sf.write(str(output_path), waveform_cpu.numpy().T, sample_rate, subtype="PCM_16")
+
+    arr = waveform_cpu.numpy()
+    if arr.shape[0] == 1:
+        sf.write(str(output_path), arr.squeeze(0), sample_rate, subtype="PCM_16")
+    else:
+        sf.write(str(output_path), arr.T, sample_rate, subtype="PCM_16")
 
 
 def _write_silent_wav(path: Path, duration_sec: int, sample_rate: int = 44100) -> None:

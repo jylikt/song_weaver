@@ -14,12 +14,17 @@ aiofiles==24.1.0
 #   CUDA 12.1: https://download.pytorch.org/whl/cu121
 #   CPU only:  https://download.pytorch.org/whl/cpu
 #
-# On your GPU server, install with:
-#   pip install torch==2.3.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
-torch==2.3.1
-torchaudio==2.3.1
+# On your GPU server, install with (pick CUDA index matching your driver):
+#   pip install 'torch>=2.6' 'torchaudio>=2.6' --index-url https://download.pytorch.org/whl/cu121
+#
+# PyTorch >= 2.6 is required by current transformers when loading .bin checkpoints
+# (CVE-2025-32434). xcodec semantic Hubert under semantic_ckpts/ is often pytorch_model.bin;
+# without torch 2.6+ either upgrade torch or convert weights to *.safetensors.
+torch>=2.6.0
+torchaudio>=2.6.0
 
 # HuggingFace Transformers — used to load the YuE model and tokenizer
+# If you upgrade transformers beyond 4.44, keep torch>=2.6 for .bin checkpoint loads.
 transformers==4.44.0
 accelerate==0.33.0
 safetensors==0.4.3

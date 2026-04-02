@@ -200,11 +200,22 @@ def _run_inference(
         codec=worker_state._codec,
         n_codebooks=n_codebooks,
         text_vocab_size=settings.yue_text_vocab_size,
+        mm_xcodec_global_offset=settings.yue_mm_xcodec_global_offset,
+        mm_xcodec_codebook_size=settings.yue_mm_xcodec_codebook_size,
+        xcodec_tokens_fps=settings.yue_xcodec_tokens_fps,
+        mm_budget_multiplier=settings.yue_causal_mm_budget_multiplier,
+        trim_waveform_to_request_duration=settings.yue_trim_waveform_to_request_duration,
+        mm_cap_window=settings.yue_causal_mm_cap_window.value,
         sample_rate=settings.yue_sample_rate,
         cfg_scale=settings.yue_cfg_scale,
         num_steps=settings.yue_num_steps,
         yue_repo_path=settings.yue_repo_path,
         yue_model_path=settings.yue_model_path,
+        yue_native_stage2_model=settings.yue_native_stage2_model,
+        yue_native_run_n_segments=settings.yue_native_run_n_segments,
+        yue_native_stage2_batch_size=settings.yue_native_stage2_batch_size,
+        yue_native_xcodec_mini_path=settings.yue_native_xcodec_mini_path,
+        yue_native_attn_implementation=settings.yue_native_attn_implementation,
     )
 
 
