@@ -37,3 +37,10 @@ scipy==1.13.1
 # Numerical / utilities
 numpy==1.26.4
 pyyaml>=6.0
+
+# xcodec_mini_infer config loader (same as YuE infer.py uses OmegaConf)
+omegaconf>=2.3.0
+
+# Protobuf — pin to >=4.21 so sentencepiece/tokenizer deps don't downgrade it
+# and break the YuE mmtokenizer (which requires proto3 runtime features).
+protobuf>=4.21

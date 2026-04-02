@@ -634,18 +634,51 @@ class _XCodecRepoWrapper:
         return getattr(self._model, name)
 
 
+def _resolve_codec_paths(obj: Any, codec_dir: str) -> Any:
+    """
+    Recursively walk a config dict/list and make path strings absolute.
+
+    Handles two cases from infer.py's argument defaults:
+      ./xcodec_mini_infer/<rel>  →  {codec_dir}/<rel>   (YuE repo layout)
+      ./<rel>                    →  {codec_dir}/<rel>    (paths relative to codec dir itself)
+
+    Strings that are not path-like or already absolute are returned unchanged.
+    Raises nothing — worst case the original string is preserved and the model
+    constructor will raise a clear error about the path.
+    """
+    if isinstance(obj, dict):
+        return {k: _resolve_codec_paths(v, codec_dir) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_resolve_codec_paths(v, codec_dir) for v in obj]
+    if isinstance(obj, str) and not os.path.isabs(obj):
+        # Strip known YuE-layout prefix first
+        for prefix in ("./xcodec_mini_infer/", "xcodec_mini_infer/"):
+            if obj.startswith(prefix):
+                resolved = os.path.join(codec_dir, obj[len(prefix):])
+                logger.debug("Config path resolved: %s → %s", obj, resolved)
+                return resolved
+        # Strip generic ./ relative-to-codec-dir paths
+        if obj.startswith("./"):
+            candidate = os.path.join(codec_dir, obj[2:])
+            if os.path.exists(candidate):
+                logger.debug("Config path resolved: %s → %s", obj, candidate)
+                return candidate
+    return obj
+
+
 def _try_xcodec_local_repo(codec_path: str, device: Any) -> "_XCodecRepoWrapper":
     """
-    Load the original m-a-p/xcodec from its research repository directory.
+    Load xcodec_mini_infer from its research repository directory.
 
-    Expected layout:
-        models/soundstream_hubert_new.py — SoundStream model class
-        final_ckpt/config.yaml          — YAML model config
-        final_ckpt/ckpt_*.pth           — model checkpoint (.pth)
-        quantization/, modules/, utils/ — imports resolved via sys.path
+    Mirrors the codec loading logic in YuE's infer.py exactly:
+      • sys.path: codec_dir AND codec_dir/descriptaudiocodec
+      • Config: OmegaConf.load(final_ckpt/config.yaml)
+      • Instantiate: eval(cfg.generator.name)(**cfg.generator.config)
+      • Weights: parameter_dict['codec_model']  (then model / state_dict fallbacks)
+      • Paths: resolve ./xcodec_mini_infer/ and ./ prefixes to absolute paths
 
-    Raises FileNotFoundError when the directory does not match this layout
-    so callers can skip it and try other strategies without logging an error.
+    Raises FileNotFoundError when the directory does not match the expected
+    layout, so callers can silently skip to the next strategy.
     """
     import sys
     import torch
@@ -654,7 +687,7 @@ def _try_xcodec_local_repo(codec_path: str, device: Any) -> "_XCodecRepoWrapper"
     codec_dir = os.path.abspath(codec_path)
     codec_dir_path = _Path(codec_dir)
 
-    # ── Layout detection ───────────────────────────────────────────────────
+    # ── Layout detection (fast, no imports) ───────────────────────────────
     model_file = codec_dir_path / "models" / "soundstream_hubert_new.py"
     ckpt_dir = codec_dir_path / "final_ckpt"
     if not model_file.exists():
@@ -667,90 +700,127 @@ def _try_xcodec_local_repo(codec_path: str, device: Any) -> "_XCodecRepoWrapper"
         )
 
     # ── Checkpoint discovery ───────────────────────────────────────────────
-    # Pick the lexicographically largest ckpt (highest step count).
     pth_files = sorted(ckpt_dir.glob("ckpt_*.pth"))
     if not pth_files:
         pth_files = sorted(ckpt_dir.glob("*.pth"))
     if not pth_files:
         raise FileNotFoundError(f"No .pth checkpoint found in {ckpt_dir}")
     ckpt_file = pth_files[-1]
-    logger.debug("xcodec repo: using checkpoint %s", ckpt_file.name)
 
     # ── Config ────────────────────────────────────────────────────────────
     config_yaml = ckpt_dir / "config.yaml"
     if not config_yaml.exists():
         raise FileNotFoundError(f"No config.yaml found in {ckpt_dir}")
 
-    # ── sys.path injection ─────────────────────────────────────────────────
-    # models/soundstream_hubert_new.py imports from quantization/, modules/,
-    # utils/, vocos/ — all relative to codec_dir.
-    inserted = codec_dir not in sys.path
-    if inserted:
-        sys.path.insert(0, codec_dir)
+    # ── sys.path (mirrors infer.py) ────────────────────────────────────────
+    # infer.py appends two paths:
+    #   sys.path.append(.../xcodec_mini_infer/)              ← codec_dir
+    #   sys.path.append(.../xcodec_mini_infer/descriptaudiocodec/)  ← for dac
+    # We keep them permanently (not removed after load) because the model's
+    # forward pass may re-import from these locations at inference time.
+    dac_dir = str(codec_dir_path / "descriptaudiocodec")
+    for p in (codec_dir, dac_dir):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+            logger.debug("sys.path += %s", p)
+
+    # ── OmegaConf config load (same as infer.py: OmegaConf.load(...)) ─────
+    try:
+        from omegaconf import OmegaConf
+    except ImportError:
+        raise ImportError(
+            "omegaconf is required to load xcodec config. "
+            "Run: pip install omegaconf"
+        )
 
     try:
-        # ── Load YAML config ───────────────────────────────────────────────
-        try:
-            import yaml as _yaml
-        except ImportError:
-            raise ImportError(
-                "pyyaml is required to load the xcodec config.yaml. "
-                "Run: pip install pyyaml"
-            )
-        with open(config_yaml, encoding="utf-8") as f:
-            cfg = _yaml.safe_load(f)
-        logger.debug("xcodec repo config keys: %s", list(cfg.keys()) if isinstance(cfg, dict) else type(cfg))
+        model_config = OmegaConf.load(str(config_yaml))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to parse xcodec config.yaml at {config_yaml}: {exc}"
+        ) from exc
 
-        # ── Import model class ─────────────────────────────────────────────
-        # Flush any stale cached module from a previous (failed) load attempt.
-        for mod_name in list(sys.modules.keys()):
-            if mod_name.startswith("models.") or mod_name == "models":
-                del sys.modules[mod_name]
+    generator_name = str(model_config.generator.name)
+    logger.debug("xcodec config loaded | generator.name=%s", generator_name)
 
+    # ── Path resolution in generator.config ───────────────────────────────
+    # Convert OmegaConf DictConfig → plain dict so we can walk and patch paths.
+    try:
+        gen_cfg: dict = OmegaConf.to_container(model_config.generator.config, resolve=True)  # type: ignore[assignment]
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to parse generator.config from {config_yaml}: {exc}"
+        ) from exc
+
+    gen_cfg = _resolve_codec_paths(gen_cfg, codec_dir)
+
+    # ── Import model class ─────────────────────────────────────────────────
+    # Flush stale cached module entries so a previous failed import doesn't
+    # shadow the freshly sys.path-patched version.
+    for mod_name in list(sys.modules.keys()):
+        if mod_name.startswith("models.") or mod_name == "models":
+            del sys.modules[mod_name]
+
+    try:
         from models.soundstream_hubert_new import SoundStream  # type: ignore[import]
+    except ImportError as exc:
+        raise ImportError(
+            f"Cannot import SoundStream from {codec_dir}/models/soundstream_hubert_new.py: {exc}"
+        ) from exc
 
-        # ── Instantiate from config ────────────────────────────────────────
-        # cfg may be a flat dict of constructor kwargs, or nested under 'model'.
-        if isinstance(cfg, dict):
-            model_kwargs = cfg.get("model", cfg)
-        else:
-            model_kwargs = {}
-
-        try:
-            model = SoundStream(**model_kwargs)
-        except TypeError as e:
-            logger.warning(
-                "SoundStream(**config) failed (%s) — retrying with no args.", e
-            )
-            model = SoundStream()
-
-        # ── Load checkpoint ────────────────────────────────────────────────
-        ckpt = torch.load(str(ckpt_file), map_location="cpu", weights_only=False)
-        if isinstance(ckpt, dict):
-            state_dict = (
-                ckpt.get("model")
-                or ckpt.get("state_dict")
-                or ckpt.get("generator")
-                or ckpt
-            )
-        else:
-            state_dict = ckpt
-
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
-        if missing:
-            logger.debug("xcodec repo: missing state_dict keys: %s", missing[:8])
-        if unexpected:
-            logger.debug("xcodec repo: unexpected state_dict keys: %s", unexpected[:5])
-
-        model = model.to(device).eval()
-        logger.info(
-            "xcodec repo loaded | ckpt=%s | device=%s", ckpt_file.name, device
+    # ── Instantiate (mirrors: eval(model_config.generator.name)(**...config)) ──
+    # We resolve the class by name from the imported module to avoid bare eval().
+    import importlib as _importlib
+    _mod = _importlib.import_module("models.soundstream_hubert_new")
+    cls = getattr(_mod, generator_name, None)
+    if cls is None:
+        raise ImportError(
+            f"Class '{generator_name}' not found in models/soundstream_hubert_new.py "
+            f"(available: {[n for n in dir(_mod) if not n.startswith('_')]})"
         )
-        return _XCodecRepoWrapper(model)
 
-    finally:
-        if inserted and codec_dir in sys.path:
-            sys.path.remove(codec_dir)
+    try:
+        codec_model = cls(**gen_cfg)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to instantiate {generator_name}(**generator.config): {exc}\n"
+            f"  config keys: {list(gen_cfg.keys())}"
+        ) from exc
+
+    # ── Load checkpoint weights ────────────────────────────────────────────
+    # infer.py: parameter_dict = torch.load(resume_path, ...)
+    #           codec_model.load_state_dict(parameter_dict['codec_model'])
+    logger.debug("xcodec repo: loading checkpoint %s", ckpt_file.name)
+    try:
+        parameter_dict = torch.load(str(ckpt_file), map_location="cpu", weights_only=False)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to load checkpoint {ckpt_file}: {exc}"
+        ) from exc
+
+    if isinstance(parameter_dict, dict):
+        state_dict = (
+            parameter_dict.get("codec_model")   # canonical key per infer.py
+            or parameter_dict.get("model")
+            or parameter_dict.get("state_dict")
+            or parameter_dict.get("generator")
+            or parameter_dict                    # bare state dict
+        )
+    else:
+        state_dict = parameter_dict
+
+    missing, unexpected = codec_model.load_state_dict(state_dict, strict=False)
+    if missing:
+        logger.debug("xcodec repo: missing keys (%d): %s", len(missing), missing[:8])
+    if unexpected:
+        logger.debug("xcodec repo: unexpected keys (%d): %s", len(unexpected), unexpected[:5])
+
+    codec_model = codec_model.to(device).eval()
+    logger.info(
+        "xcodec repo loaded | cls=%s | ckpt=%s | device=%s",
+        generator_name, ckpt_file.name, device,
+    )
+    return _XCodecRepoWrapper(codec_model)
 
 
 def _try_xcodec2_pkg(codec_path: str, token: Optional[str]) -> Any:
